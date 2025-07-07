@@ -1,0 +1,16 @@
+numpy
+moderngl
+moderngl-window
+pillow
+scipy
+colour
+pydub
+pygments
+pyperclip
+IPython
+PyYAML
+
+[dev]
+pytest
+black
+flake8

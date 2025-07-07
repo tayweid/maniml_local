@@ -1,0 +1,2 @@
+[console_scripts]
+maniml = maniml.__main__:main

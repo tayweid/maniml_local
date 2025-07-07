@@ -1,0 +1,150 @@
+# maniml - Standalone Manim for Mathematical Animations
+
+[![Python Version](https://img.shields.io/badge/python-3.7%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+maniml is a standalone version of Manim (Mathematical Animation Engine) that works without external Manim dependencies. It provides a simple, self-contained way to create beautiful mathematical animations.
+
+## ✨ Features
+
+- 🎯 **Standalone**: No external Manim dependencies required
+- 🖼️ **Preview by Default**: Animations open in an interactive window automatically
+- 🎮 **Interactive Objects**: Draggable shapes and interactive elements
+- 🧮 **LaTeX Support**: Beautiful mathematical expressions (requires LaTeX)
+- 🎨 **Rich Animations**: Comprehensive animation types from Manim
+- 📐 **3D Scenes**: Full 3D animation support
+- 🔄 **Live Reload**: Auto-reload for rapid development
+
+## 🚀 Quick Start
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/maniml.git
+cd maniml
+
+# Install in development mode
+pip install -e maniml_package/
+```
+
+### Your First Animation
+
+Create a file `hello.py`:
+
+```python
+from maniml import *
+
+class HelloWorld(Scene):
+    def construct(self):
+        text = Text("Hello, maniml!")
+        self.play(Write(text))
+        self.wait()
+```
+
+Run it:
+
+```bash
+maniml hello.py HelloWorld
+```
+
+## 📚 Examples
+
+Explore the `examples/` directory for comprehensive demonstrations:
+
+- **Basic**: Simple shapes, animations, and LaTeX
+- **Interactive**: Draggable objects and mouse interactions  
+- **3D**: Three-dimensional scenes and animations
+- **Advanced**: Complex animations and special features
+
+```bash
+# Run a basic example
+maniml examples/basic/01_hello_world.py HelloWorld
+
+# Run an interactive example
+maniml examples/interactive/01_draggable_shapes.py DraggableShapes
+
+# Run a 3D example
+maniml examples/3d/01_basic_3d_shapes.py Basic3DShapes
+```
+
+## 🛠️ Core Components
+
+### Shapes and Objects
+```python
+circle = Circle(radius=1, color=BLUE)
+square = Square(side_length=2, color=RED)
+text = Text("Hello", font_size=48)
+equation = MathTex(r"x^2 + y^2 = r^2")
+```
+
+### Animations
+```python
+self.play(Create(circle))
+self.play(Transform(circle, square))
+self.play(FadeOut(text))
+self.play(circle.animate.shift(RIGHT * 2))
+```
+
+### Interactive Elements
+```python
+draggable = MotionMobject(circle)  # Makes any object draggable
+button = Button(rect, on_click=lambda: print("Clicked!"))
+slider = LinearNumberSlider(min_value=0, max_value=10)
+```
+
+### 3D Scenes
+```python
+class My3DScene(ThreeDScene):
+    def construct(self):
+        sphere = Sphere(radius=1, color=BLUE)
+        self.play(Create(sphere))
+        self.play(self.frame.animate.rotate(PI/4, axis=UP))
+```
+
+## 📖 Documentation
+
+- [Examples README](examples/README.md) - Detailed example descriptions
+- [API Reference](docs/api/README.md) - Complete API documentation
+- [Migration Guide](docs/MIGRATION.md) - Migrating from ManimCE/GL
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+python tests/integration/run_all_tests.py
+
+# Run specific tests
+python tests/integration/test_maniml_imports.py
+```
+
+## 🤝 Contributing
+
+Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) first.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- Original [Manim](https://github.com/3b1b/manim) by Grant Sanderson (3Blue1Brown)
+- [ManimCommunity](https://github.com/ManimCommunity/manim) for the community edition
+- All contributors who have helped make this project possible
+
+## 🐛 Known Issues
+
+- LaTeX rendering requires a LaTeX installation
+- Some ManimCE-specific methods may have different names
+- See [Issues](https://github.com/yourusername/maniml/issues) for more
+
+## 📮 Contact
+
+- GitHub Issues: [Create an issue](https://github.com/yourusername/maniml/issues)
+- Discussions: [Join the discussion](https://github.com/yourusername/maniml/discussions)
