@@ -15,6 +15,7 @@ from pyglet.window import key as PygletWindowKeys
 import difflib
 import itertools as it
 import numpy as np
+import copy
 
 # Import event system - use ManimGL's since that's what the mobjects use
 from maniml.manimgl_core.event_handler import EVENT_DISPATCHER
@@ -1371,30 +1372,8 @@ class Scene(GLScene):
         
         print(f"[PLAY_NEXT DEBUG] Last checkpoint line: {start_after_line}")
         
-        # Check if we already have a checkpoint for the next animation
-        # This happens when the file change didn't remove that checkpoint
-        next_checkpoint_index = current_checkpoint_index + 1
-        if next_checkpoint_index < len(self.animation_checkpoints):
-            next_checkpoint = self.animation_checkpoints[next_checkpoint_index]
-            if len(next_checkpoint) > 3 and isinstance(next_checkpoint[3], dict):
-                print(f"[PLAY_NEXT DEBUG] Found existing checkpoint {next_checkpoint_index} with animation info, replaying that")
-                animation_info = next_checkpoint[3]
-                
-                # Replay the animation
-                self._navigating_animations = True
-                try:
-                    if animation_info['type'] == 'play':
-                        self.play(*animation_info['animations'], **animation_info['kwargs'])
-                    elif animation_info['type'] == 'wait':
-                        self.wait(
-                            duration=animation_info['duration'],
-                            stop_condition=animation_info['stop_condition'],
-                            frozen_frame=animation_info['frozen_frame']
-                        )
-                    return True
-                finally:
-                    self._navigating_animations = False
-        
+        # Always extract and execute code from the updated file
+        # We should NOT replay existing checkpoints - we need fresh execution
         # Extract code after the last checkpoint
         code_to_execute = self._extract_code_after_line(start_after_line, self._updated_content)
         
@@ -1490,7 +1469,15 @@ class Scene(GLScene):
         print(f"\nUse jump_to(index) to jump to any checkpoint.")
     
     def play(self, *animations, **kwargs):
-        """Play animations with checkpoint support."""
+        """Play animations with checkpoint support.
+        
+        Checkpoint structure: (index, line_no, state, caller_locals, animation_info)
+        - index: Animation index
+        - line_no: Line number where play() was called
+        - state: SceneState object with mobject copies
+        - caller_locals: Dict of local variables (deepcopied when possible)
+        - animation_info: Dict with animation details for replay
+        """
         is_navigating = hasattr(self, '_navigating_animations') and self._navigating_animations
         
         # Check if we should stop after one animation (hot reload)

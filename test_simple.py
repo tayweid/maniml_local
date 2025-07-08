@@ -10,13 +10,25 @@ class TestSimple(Scene):
         self.play(Create(circle))
         
         # Animation 2  
-        self.play(Create(square))
+        self.play(FadeIn(square))
+        
+        # Animation 3 - Move objects
+        self.play(
+            circle.animate.shift(UP),
+            square.animate.shift(DOWN)
+        )
+
+        # Animation 4 - Scale both again
+        self.play(
+            circle.animate.scale(2),
+            square.animate.scale(2)
+        )
 
         # ani 2.1
-        self.play(circle.animate.scale(1.3))
-        
-        # Animation 3 - Scale both
+        self.play(circle.animate.scale(1.2))
+
+        # Animation 3 - Move objects
         self.play(
-            circle.animate.scale(1),
-            square.animate.scale(2)
+            circle.animate.shift(UP),
+            square.animate.shift(DOWN)
         )
