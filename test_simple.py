@@ -8,7 +8,7 @@ class TestSimple(Scene):
         
         # Animation 1
         self.play(Create(circle))
-        
+
         # Animation 2  
         self.play(FadeIn(square))
         

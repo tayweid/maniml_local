@@ -424,9 +424,11 @@ class Scene(GLScene):
         # Call parent update
         super().update_frame(dt, force_draw)
     
-    def setup_interactive(self):
+    def interact(self):
         """Override to suppress the tips message."""
-        # Skip the log.info message from parent
+        if self.window is None:
+            return
+        # Don't print the ManimGL tips message - we have our own navigation message
         self.skip_animations = False
         while not self.is_window_closing():
             self.update_frame(1 / self.camera.fps)
@@ -490,6 +492,8 @@ class Scene(GLScene):
                 self.current_animation_index = self.jump_to_next_animation(self.current_animation_index)
             else:
                 # No next checkpoint, run new animation from file
+                # Reset the flag to allow next animation
+                self._one_animation_executed = False
                 success = self.run_next_animation(self.current_animation_index)
                 if success:
                     # run_next_animation creates a new checkpoint and updates index
@@ -514,6 +518,9 @@ class Scene(GLScene):
             # Prevent handling if we're already processing a key
             if hasattr(self, '_processing_key') and self._processing_key:
                 return
+            
+            # Reset the flag to allow next animation
+            self._one_animation_executed = False
             
             # Check if there's a next checkpoint to play
             next_index = self.current_animation_index + 1
@@ -823,6 +830,19 @@ class Scene(GLScene):
         # Since we just restored to a checkpoint before the edit, we need to run
         # animations until we create a checkpoint past the edit region
         
+        # Special case: if we're already at a checkpoint that ends within the edit region,
+        # we need to re-run just that animation
+        if restore_checkpoint_index >= 0 and restore_checkpoint_index < len(self.animation_checkpoints):
+            current_checkpoint = self.animation_checkpoints[restore_checkpoint_index]
+            if smallest_line_edit <= current_checkpoint[1] <= largest_line_edit:
+                # The current checkpoint itself is in the edit region
+                # Just run this one animation
+                print(f"[EDIT] Current checkpoint at line {current_checkpoint[1]} is within edit region")
+                print(f"[EDIT] Running just this animation...")
+                success = self.run_next_animation(self.current_animation_index)
+                print("[EDIT] Edit checkpoint complete")
+                return
+        
         # Run ONE animation at a time and check
         while True:
             # Check if we should continue
@@ -915,34 +935,54 @@ class Scene(GLScene):
         return None
     
     def _find_changed_line_ranges(self, old_content, new_content):
-        """Find all line ranges that changed."""
+        """Find all line ranges that changed using proper diff algorithm."""
+        import difflib
+        
+        # Use difflib to get a proper diff
+        differ = difflib.SequenceMatcher(None, old_content, new_content)
         changed_ranges = []
         
-        # Simple approach: find contiguous blocks of changed lines
-        i = 0
-        while i < max(len(old_content), len(new_content)):
-            old_line = old_content[i] if i < len(old_content) else None
-            new_line = new_content[i] if i < len(new_content) else None
-            
-            if old_line != new_line:
-                # Start of a changed block
-                start = i + 1  # Convert to 1-based
-                end = start
-                
-                # Find end of changed block
-                j = i + 1
-                while j < max(len(old_content), len(new_content)):
-                    old_j = old_content[j] if j < len(old_content) else None
-                    new_j = new_content[j] if j < len(new_content) else None
-                    if old_j == new_j:
-                        break
-                    end = j + 1  # Convert to 1-based
-                    j += 1
-                
+        # Get the opcodes which tell us what changed
+        for tag, i1, i2, j1, j2 in differ.get_opcodes():
+            if tag == 'equal':
+                # Lines are the same, skip
+                continue
+            elif tag == 'replace':
+                # Lines were replaced - these are actual content changes
+                # Use the line numbers from the NEW content
+                start = j1 + 1  # Convert to 1-based
+                end = j2  # j2 is exclusive, so it's already correct
                 changed_ranges.append((start, end))
-                i = j
-            else:
-                i += 1
+            elif tag == 'insert':
+                # Lines were inserted
+                # The inserted lines themselves are "changed"
+                start = j1 + 1
+                end = j2
+                changed_ranges.append((start, end))
+            elif tag == 'delete':
+                # Lines were deleted
+                # We need to handle this carefully - the deletion point matters
+                # Use the line number where deletion occurred in the new content
+                deletion_point = j1 + 1
+                # For deletions, we often want to re-run the animation at that line
+                # if it exists (e.g., if we deleted a wait() between animations)
+                if deletion_point <= len(new_content):
+                    changed_ranges.append((deletion_point, deletion_point))
+        
+        # Merge overlapping or adjacent ranges
+        if changed_ranges:
+            merged = []
+            current_start, current_end = changed_ranges[0]
+            
+            for start, end in changed_ranges[1:]:
+                if start <= current_end + 1:  # Adjacent or overlapping
+                    current_end = max(current_end, end)
+                else:
+                    merged.append((current_start, current_end))
+                    current_start, current_end = start, end
+            
+            merged.append((current_start, current_end))
+            changed_ranges = merged
         
         return changed_ranges
     
@@ -1283,9 +1323,7 @@ class Scene(GLScene):
             if len(checkpoint) > 4 and checkpoint[4]:
                 # Show animation info
                 anim_info_data = checkpoint[4]
-                if isinstance(anim_info_data, dict) and anim_info_data.get('type') == 'wait':
-                    anim_info = f" (wait {anim_info_data.get('duration', 1.0)}s)"
-                elif isinstance(anim_info_data, dict) and anim_info_data.get('type') == 'play':
+                if isinstance(anim_info_data, dict) and anim_info_data.get('type') == 'play':
                     anims = anim_info_data.get('animations', [])
                     anim_info = f" ({len(anims)} animation{'s' if len(anims) > 1 else ''})"
             print(f"  {i}: Animation at line {line_no}{anim_info}")
@@ -1311,7 +1349,15 @@ class Scene(GLScene):
             else:
                 # This is the one animation to execute
                 self._one_animation_executed = True
-                is_navigating = False  # Allow checkpoint creation
+                # Don't override is_navigating - respect the _navigating_animations flag
+                
+                # If this is the very first animation, print navigation tip
+                if self.current_animation_index == -1:
+                    print("\n[Navigation] Use arrow keys to control animations:")
+                    print("  → Play next animation")
+                    print("  ↓ Jump to next animation")
+                    print("  ← Jump to previous animation")
+                    print("  ↑ Jump to previous animation")
         
         # Capture the animation info BEFORE playing
         if not is_navigating:
@@ -1389,91 +1435,15 @@ class Scene(GLScene):
         return result
     
     def wait(self, duration=1.0, stop_condition=None, frozen_frame=None):
-        """Wait with checkpoint support."""
-        is_navigating = hasattr(self, '_navigating_animations') and self._navigating_animations
-        
+        """Wait without creating checkpoints."""
         # Check if we should stop after one animation (hot reload)
         if hasattr(self, '_stop_after_one_animation') and self._stop_after_one_animation:
             if hasattr(self, '_one_animation_executed') and self._one_animation_executed:
                 # Already executed one animation, skip the rest
                 return
-            else:
-                # This is the one animation to execute
-                self._one_animation_executed = True
-                is_navigating = False  # Allow checkpoint creation
         
-        # Capture the wait info BEFORE executing
-        if not is_navigating:
-            # Get the line number
-            frame = inspect.currentframe().f_back
-            line_no = frame.f_lineno
-            
-            # If we're running from exec'd code, adjust the line number
-            if '__line_offset__' in frame.f_locals:
-                line_no += frame.f_locals['__line_offset__']
-            
-            # For multi-line statements, we need to find the end line
-            if hasattr(self, '_scene_filepath') and self._scene_filepath:
-                try:
-                    import ast
-                    # Use updated content if available, otherwise file content
-                    if hasattr(self, '_updated_content') and self._updated_content:
-                        source = ''.join(self._updated_content)
-                    else:
-                        with open(self._scene_filepath, 'r') as f:
-                            source = f.read()
-                    
-                    # Parse the source to find the actual end line
-                    tree = ast.parse(source)
-                    
-                    # Find the node that contains our line
-                    for node in ast.walk(tree):
-                        if isinstance(node, ast.Call) and hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
-                            if node.lineno <= line_no <= (node.end_lineno or node.lineno):
-                                # Found our call, use the end line
-                                if node.end_lineno:
-                                    line_no = node.end_lineno
-                                break
-                except Exception as e:
-                    # If parsing fails, stick with the original line number
-                    pass
-            
-            # Store the local variables from the calling frame
-            caller_locals = {}
-            for name, obj in frame.f_locals.items():
-                if not name.startswith('_') and name != 'self':
-                    caller_locals[name] = obj  # Store reference, not copy
-            
-            # Store the wait parameters for replay
-            animation_info = {
-                'type': 'wait',
-                'duration': duration,
-                'stop_condition': stop_condition,
-                'frozen_frame': frozen_frame,
-                'line_no': line_no
-            }
-        
-        # Always execute the wait normally
+        # Just execute the wait normally - no checkpoint creation
         result = super().wait(duration, stop_condition, frozen_frame)
-        
-        # Only save checkpoints if we're NOT navigating with arrow keys
-        if not is_navigating:
-            # Save checkpoint AFTER wait completes
-            self.current_animation_index += 1
-            state = self.get_state()
-            # Store everything needed to replay this wait
-            self.animation_checkpoints.append((
-                self.current_animation_index, 
-                line_no, 
-                state, 
-                caller_locals,
-                animation_info  # Store the wait info
-            ))
-            print(f"[CHECKPOINT] Created checkpoint {self.current_animation_index} at line {line_no} (wait), total: {len(self.animation_checkpoints)}")
-            
-            # Keep only last 50 checkpoints
-            if len(self.animation_checkpoints) > 50:
-                self.animation_checkpoints.pop(0)
         
         return result
     
@@ -1581,7 +1551,6 @@ class Scene(GLScene):
             else:
                 start_after_line = 0
             
-            print(f"[RUN_NEXT] Starting after line {start_after_line}")
             
             # Extract code with commenting
             code_to_execute = self._extract_code_with_comments(content, start_after_line)
@@ -1601,8 +1570,7 @@ class Scene(GLScene):
                 return False
             
             # Set flags to execute only one animation
-            self._stop_after_one_animation = True
-            self._one_animation_executed = False
+            # Don't reset _one_animation_executed here - it should be managed by navigation
             
             # Create namespace
             namespace = {'self': self}
@@ -1640,10 +1608,10 @@ class Scene(GLScene):
         finally:
             # Clean up flags
             self._processing_key = False
-            if hasattr(self, '_stop_after_one_animation'):
-                delattr(self, '_stop_after_one_animation')
+            # Don't delete _stop_after_one_animation - we want this behavior permanently
+            # Reset _one_animation_executed for next navigation
             if hasattr(self, '_one_animation_executed'):
-                delattr(self, '_one_animation_executed')
+                self._one_animation_executed = False
     
     def play_next_animation(self, current_checkpoint):
         """
@@ -1681,16 +1649,13 @@ class Scene(GLScene):
                         animations = animation_info['animations']
                         kwargs = animation_info['kwargs']
                         self.play(*animations, **kwargs)
-                    elif animation_info['type'] == 'wait':
-                        self.wait(
-                            duration=animation_info['duration'],
-                            stop_condition=animation_info['stop_condition'],
-                            frozen_frame=animation_info['frozen_frame']
-                        )
-                    
-                    # Update index after successful playback
-                    self.current_animation_index = next_index
-                    return True
+                        
+                        # Update index after successful playback
+                        self.current_animation_index = next_index
+                        return True
+                    else:
+                        print(f"Unknown animation type: {animation_info['type']}")
+                        return False
                     
                 finally:
                     self._navigating_animations = False
