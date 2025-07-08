@@ -1,32 +1,95 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with the maniml project.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-maniml is a standalone fork of ManimGL (Grant Sanderson's original Manim) designed for creating mathematical animations. It aims to provide a simpler, more stable alternative to both ManimGL and ManimCE (Community Edition) while maintaining compatibility with ManimGL's API.
+maniml_local is a working implementation that runs ManimCE code on ManimGL's fast OpenGL renderer. This codebase demonstrates how to combine ManimCE's API with ManimGL's performance through a compatibility layer.
 
-### Key Goals
+### Key Architecture
 
-1. **Simplicity**: Remove unnecessary complexity from ManimGL while keeping core functionality
-2. **Stability**: Provide a reliable animation framework without frequent breaking changes
-3. **Compatibility**: Maintain API compatibility with ManimGL to ease migration
-4. **Interactivity**: Support interactive animations with mouse/keyboard input (a key ManimGL feature)
-5. **Performance**: Optimize for real-time rendering and smooth animations
+The project uses a dual-layer structure:
+- **maniml/**: Compatibility layer providing ManimCE-style API
+- **maniml/manimgl_core/**: Forked ManimGL engine for OpenGL rendering
 
-## Project Background
+This allows existing ManimCE code to run with 10-20x performance improvements.
 
-### Relationship to Other Manim Versions
+## Commands
 
-- **ManimGL**: The original version by Grant Sanderson (3Blue1Brown). maniml is forked from this.
-- **ManimCE**: Community Edition fork focused on rendering quality. Takes a different approach.
-- **maniml**: This project - aims to be a "best of both worlds" solution.
+### Running Animations
+```bash
+# Standard usage (always opens preview window)
+maniml script.py SceneName
 
-Key differences:
-- ManimGL uses OpenGL for real-time rendering → maniml keeps this
-- ManimCE uses Cairo for high-quality output → maniml doesn't use this
-- ManimGL has interactive features → maniml enhances these
-- ManimCE has extensive documentation → maniml aims to match this
+# Run with auto-reload for development
+maniml script.py SceneName --autoreload
+
+# Examples
+maniml examples/01_getting_started/01_hello_world.py HelloWorld
+```
+
+### Testing
+```bash
+# Run all integration tests
+python tests/integration/run_all_tests.py
+
+# Run unit tests with pytest
+pytest tests/unit/
+
+# Run with coverage
+pytest --cov=maniml --cov-report=html
+```
+
+### Development Setup
+```bash
+# Install in development mode
+pip install -e .
+
+# Alternative setup script
+./setup.sh
+```
+
+## High-Level Architecture
+
+### Compatibility Layer Design
+The `maniml/` directory wraps ManimGL functionality to provide ManimCE compatibility:
+- **Animation mapping**: `Create` → `ShowCreation`, `Uncreate` → `Uncreation`
+- **Default values**: CE-style defaults for colors, sizes, positions
+- **API translation**: Methods and parameters adapted to match CE expectations
+- **Font handling**: Cross-platform font name mapping
+
+### Auto-Reload System
+Located in `maniml/scene/scene.py`, this system enables hot-reloading during development:
+- Watches for file changes and re-executes only modified code
+- Maintains scene state through checkpoints
+- Preserves mobject positions and properties between reloads
+- Supports line-by-line change detection
+
+### Rendering Pipeline
+1. **Scene Construction**: User code creates mobjects and animations
+2. **API Translation**: CE calls converted to GL equivalents
+3. **OpenGL Rendering**: ManimGL core handles GPU acceleration
+4. **Window Management**: Real-time preview with interactive controls
+
+### Key Integration Points
+- **Scene class**: Enhanced with auto-reload and CE compatibility
+- **Animation system**: Dual inheritance for CE/GL compatibility
+- **Mobject wrappers**: Translate properties and methods
+- **Config system**: Unified configuration handling
+
+## Performance Considerations
+
+### OpenGL vs Cairo
+- This implementation uses OpenGL (like ManimGL) instead of Cairo (like ManimCE)
+- Results in 10-20x faster rendering for most scenes
+- Real-time preview instead of file generation
+- GPU acceleration for complex animations
+
+### Optimization Strategies
+- Batch operations using `VGroup`
+- Minimize updater functions
+- Cache computed values where possible
+- Use shader-based effects for performance
 
 ## Code Architecture
 

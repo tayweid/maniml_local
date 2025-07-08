@@ -48,6 +48,8 @@ Examples:
                     from maniml.manimgl_core.window import Window
                     window = Window()
                     scene = scene_class(window=window)
+                    # Pass the actual script file path to the scene
+                    scene._scene_filepath = os.path.abspath(script_file)
                     scene.run()
             else:
                 print(f"Error: Scene '{scene_name}' not found in {script_file}")
