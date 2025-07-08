@@ -1,6 +1,6 @@
 from maniml import *
 
-class TestReloadDebug(Scene):
+class TestAutoReload(Scene):
     def construct(self):
         # Create objects
         circle = Circle(color=BLUE)
@@ -8,15 +8,19 @@ class TestReloadDebug(Scene):
         
         # Animation 1
         self.play(Create(circle))
+        self.wait(0.5)
         
         # Animation 2 - CHANGE THIS to FadeIn
         self.play(Create(square))
+        self.wait(0.5)
         
         # Animation 3
         self.play(
             circle.animate.scale(0.5),
             square.animate.scale(1.5)
         )
+        self.wait(0.5)
         
-        print("\nEdit line 13: Change Create(square) to FadeIn(square)")
-        self.wait(30)
+        print("\nEdit line 14: Change Create(square) to FadeIn(square)")
+        print("The animation should replay automatically")
+        self.wait(20)  # Keep open for testing

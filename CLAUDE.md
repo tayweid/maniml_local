@@ -316,3 +316,17 @@ class InteractiveDemo(Scene):
 5. Open GitHub issue for bugs/questions
 
 Remember: maniml prioritizes clarity and usability. When in doubt, choose the simpler solution.
+
+## Development Ideas and Approaches
+
+### Auto-Reload and Checkpointing Mechanism
+- When an edit is detected:
+  - Jump back to the state before the animation
+  - Execute remaining code until one animation plays
+  - Store this animation as a checkpoint
+  - If a forward key is pressed, repeat the process with code after the current animation
+- Key implementation requirements:
+  - `is_file_changed()` function
+  - `play_next_animation()` function that plays one animation and stores it as a checkpoint
+  - Mechanism to track the current checkpoint
+- This approach provides a simple and flexible method for handling code changes during development
