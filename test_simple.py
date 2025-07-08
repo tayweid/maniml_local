@@ -25,10 +25,10 @@ class TestSimple(Scene):
         )
 
         # ani 2.1
-        self.play(circle.animate.scale(1.2))
+        self.play(circle.animate.scale(0.3))
 
-        # Animation 3 - Move objects
+        # Animation 5 - Move objects  
         self.play(
-            circle.animate.shift(UP),
-            square.animate.shift(DOWN)
+            circle.animate.shift(UP*0.1),
+            square.animate.shift(DOWN*0.2)
         )

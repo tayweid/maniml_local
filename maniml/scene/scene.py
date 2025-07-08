@@ -151,6 +151,10 @@ class Scene(GLScene):
         # Track mobject variable names for animation replay
         self._mobject_to_name = {}  # Maps mobject id to variable name
         
+        # Start in single-animation mode
+        self._stop_after_one_animation = True
+        self._one_animation_executed = False
+        
         # InteractiveScene attributes
         self.selection = Group()
         self.selection_highlight = None  # Will be initialized in setup()
@@ -465,19 +469,10 @@ class Scene(GLScene):
             if len(self.animation_checkpoints) == 0:
                 print("No animations recorded yet")
                 return
-                
-            if self.current_animation_index > 0:
-                self.current_animation_index -= 1
-                # Ensure index is within bounds
-                checkpoint_index = min(self.current_animation_index, len(self.animation_checkpoints) - 1)
-                checkpoint = self.animation_checkpoints[checkpoint_index]
-                print(f"↑ Jump to animation {checkpoint_index + 1}/{len(self.animation_checkpoints)}")
-                self.restore_state(checkpoint[2])
-                self.update_frame(dt=0, force_draw=True)
-            else:
-                print("Already at first animation")
+            
+            self.current_animation_index = self.jump_to_previous_animation(self.current_animation_index)
         
-        # Handle DOWN arrow - jump to next animation
+        # Handle DOWN arrow - jump to next animation or run new code
         elif symbol == PygletWindowKeys.DOWN:
             # Prevent if we're processing another key
             if hasattr(self, '_processing_key') and self._processing_key:
@@ -487,25 +482,22 @@ class Scene(GLScene):
             if hasattr(self, 'playing') and self.playing:
                 self.skip_animations = True
                 return  # Let animation finish, then user can press DOWN again
-                
-            if len(self.animation_checkpoints) == 0:
-                print("No animations recorded yet")
-                return
-                
-            # Ensure current index is valid
-            max_index = len(self.animation_checkpoints) - 1
-            current_valid_index = min(self.current_animation_index, max_index)
             
-            if current_valid_index < max_index:
-                self.current_animation_index = current_valid_index + 1
-                checkpoint = self.animation_checkpoints[self.current_animation_index]
-                print(f"↓ Jump to animation {self.current_animation_index + 1}/{len(self.animation_checkpoints)}")
-                self.restore_state(checkpoint[2])
-                self.update_frame(dt=0, force_draw=True)
+            # Check if there's a next checkpoint
+            next_index = self.current_animation_index + 1
+            if next_index < len(self.animation_checkpoints):
+                # Jump to next checkpoint
+                self.current_animation_index = self.jump_to_next_animation(self.current_animation_index)
             else:
-                print("Already at last animation")
+                # No next checkpoint, run new animation from file
+                success = self.run_next_animation(self.current_animation_index)
+                if success:
+                    # run_next_animation creates a new checkpoint and updates index
+                    pass
+                else:
+                    print("No more animations to run")
         
-        # Handle LEFT arrow - play animation in reverse
+        # Handle LEFT arrow - jump to previous animation
         elif symbol == PygletWindowKeys.LEFT:
             # Prevent handling if we're already processing a key
             if hasattr(self, '_processing_key') and self._processing_key:
@@ -514,34 +506,8 @@ class Scene(GLScene):
             if len(self.animation_checkpoints) == 0:
                 print("No animations recorded yet")
                 return
-                
-            if self.current_animation_index > 0:
-                # Set flag to prevent re-entry
-                self._processing_key = True
-                try:
-                    # Get valid indices
-                    current_idx = min(self.current_animation_index, len(self.animation_checkpoints) - 1)
-                    prev_idx = max(0, current_idx - 1)
-                    
-                    # Get the current checkpoint and the previous one
-                    current_checkpoint = self.animation_checkpoints[current_idx]
-                    prev_checkpoint = self.animation_checkpoints[prev_idx]
-                    
-                    # We need to reverse the animation from current to previous state
-                    # This is tricky - for now just jump back
-                    self.current_animation_index -= 1
-                    print(f"← Reverse to animation {prev_idx + 1}/{len(self.animation_checkpoints)}")
-                    self.restore_state(prev_checkpoint[2])
-                    self.update_frame(dt=0, force_draw=True)
-                    # TODO: Implement actual reverse animation playback
-                    
-                    # Set navigating flag to prevent new checkpoints after restore
-                    self._navigating_animations = True
-                finally:
-                    # Clear the flag
-                    self._processing_key = False
-            else:
-                print("Already at first animation")
+            
+            self.current_animation_index = self.jump_to_previous_animation(self.current_animation_index)
         
         # Handle RIGHT arrow - play next animation forward
         elif symbol == PygletWindowKeys.RIGHT:
@@ -549,182 +515,21 @@ class Scene(GLScene):
             if hasattr(self, '_processing_key') and self._processing_key:
                 return
             
-            if len(self.animation_checkpoints) == 0:
-                print("No animations recorded yet")
-                return
-                
-            # Play the animation by extracting and running the code
-            max_index = len(self.animation_checkpoints) - 1
-            current_valid_index = max(0, min(self.current_animation_index, max_index)) if self.current_animation_index >= 0 else -1
-            
-            print(f"[RIGHT DEBUG] current_animation_index: {self.current_animation_index}, max_index: {max_index}, current_valid_index: {current_valid_index}")
-            
-            # Check if we can play the next animation
-            # We can play if our current position is less than the last checkpoint index
-            # OR if we have updated content to execute
-            can_play_from_checkpoints = current_valid_index < max_index or (self.current_animation_index == -1 and len(self.animation_checkpoints) > 0)
-            
-            if can_play_from_checkpoints:
-                # Set flag to prevent re-entry
-                self._processing_key = True
-                
-                try:
-                    next_index = current_valid_index + 1
-                    next_checkpoint = self.animation_checkpoints[next_index]
-                    
-                    # IMPORTANT: Checkpoints are created AFTER animations complete
-                    # So to replay the animation that created checkpoint N,
-                    # we need to restore to checkpoint N-1
-                    # 
-                    # Example: To replay the scale animation that created checkpoint 4,
-                    # we need to restore to checkpoint 3 (state before the scale)
-                    
-                    # For the first animation, there's no previous checkpoint
-                    if next_index == 0:
-                        # First animation - restore to initial state if needed
-                        print(f"→ Playing animation {next_index + 1}/{len(self.animation_checkpoints)}")
-                    else:
-                        # Restore to the checkpoint BEFORE the one we're about to create
-                        restore_checkpoint_index = next_index - 1
-                        restore_checkpoint = self.animation_checkpoints[restore_checkpoint_index]
-                        print(f"[RESTORE] Restoring to state from checkpoint {restore_checkpoint_index}")
-                        self.restore_state(restore_checkpoint[2])
-                        print(f"→ Playing animation {next_index + 1}/{len(self.animation_checkpoints)}")
-                    
-                    # Check if this checkpoint has animation info (new format)
-                    if len(next_checkpoint) > 4 and isinstance(next_checkpoint[4], dict):
-                        animation_info = next_checkpoint[4]
-                        stored_locals = next_checkpoint[3]
-                        
-                        # Execute the stored animation
-                        # Always set navigating flag to prevent duplicate checkpoints
-                        self._navigating_animations = True
-                        try:
-                            
-                            if animation_info['type'] == 'play':
-                                # Replay the play() call
-                                animations = animation_info['animations']
-                                kwargs = animation_info['kwargs']
-                                print(f"[EXEC] Replaying play() from line {animation_info['line_no']}")
-                                # Debug: print what animations we're replaying
-                                for i, anim in enumerate(animations):
-                                    if hasattr(anim, 'mobject') and hasattr(anim, 'target_mobject'):
-                                        print(f"  Animation {i}: {type(anim).__name__} on {type(anim.mobject).__name__}")
-                                        if hasattr(anim.target_mobject, 'get_scale'):
-                                            print(f"    Target scale: {anim.target_mobject.get_scale()}")
-                                self.play(*animations, **kwargs)
-                            elif animation_info['type'] == 'wait':
-                                # Replay the wait() call
-                                print(f"[EXEC] Replaying wait({animation_info['duration']}) from line {animation_info['line_no']}")
-                                self.wait(
-                                    duration=animation_info['duration'],
-                                    stop_condition=animation_info['stop_condition'],
-                                    frozen_frame=animation_info['frozen_frame']
-                                )
-                            
-                            # Update index after successful playback
-                            self.current_animation_index = next_index
-                        except Exception as e:
-                            print(f"Error replaying animation: {e}")
-                            # Fall back to jump
-                            self.current_animation_index = next_index
-                            self.restore_state(next_checkpoint[2])
-                            self.update_frame(dt=0, force_draw=True)
-                        finally:
-                            self._navigating_animations = False
-                    else:
-                        # Old format checkpoint or no animation info
-                        # This can happen after file reload - extract and run the animation from file
-                        print("No animation info stored, extracting from file...")
-                        
-                        # We need to get the current file content and extract the animation
-                        if hasattr(self, '_scene_filepath') and self._scene_filepath:
-                            try:
-                                with open(self._scene_filepath, 'r') as f:
-                                    lines = f.readlines()
-                                
-                                # Extract code for this specific animation
-                                # Start from previous checkpoint line (or 0)
-                                if next_index > 0:
-                                    start_line = self.animation_checkpoints[next_index - 1][1]
-                                else:
-                                    start_line = 0
-                                
-                                end_line = next_checkpoint[1]
-                                
-                                # Extract just this animation's code
-                                code_to_run = self._extract_animation_code(lines, start_line, end_line)
-                                
-                                if code_to_run:
-                                    print(f"[EXEC] Extracted animation code: {code_to_run.strip()[:100]}...")
-                                    
-                                    # Add blank lines to preserve line numbers
-                                    # The code should execute at the correct line for error reporting
-                                    padding = '\n' * start_line
-                                    code_with_padding = padding + code_to_run
-                                    
-                                    # Execute with proper namespace
-                                    self._navigating_animations = True
-                                    try:
-                                        # Use stored locals from the checkpoint we're jumping from
-                                        namespace = {'self': self}
-                                        exec("from maniml import *", namespace)
-                                        
-                                        # Add stored locals if available
-                                        if next_index > 0:
-                                            prev_checkpoint = self.animation_checkpoints[next_index - 1]
-                                            if len(prev_checkpoint) > 3:
-                                                namespace.update(prev_checkpoint[3])
-                                        
-                                        # Execute the code (navigating flag is already True to prevent duplicate checkpoints)
-                                        exec(code_with_padding, namespace)
-                                        self.current_animation_index = next_index
-                                    finally:
-                                        self._navigating_animations = False
-                                else:
-                                    # No code found, just jump
-                                    print("No animation code found, jumping to state")
-                                    self.current_animation_index = next_index
-                                    self.restore_state(next_checkpoint[2])
-                                    self.update_frame(dt=0, force_draw=True)
-                                    
-                            except Exception as e:
-                                print(f"Error extracting animation: {e}")
-                                # Fall back to jump
-                                self.current_animation_index = next_index
-                                self.restore_state(next_checkpoint[2])
-                                self.update_frame(dt=0, force_draw=True)
-                        else:
-                            # No file path, just jump
-                            self.current_animation_index = next_index
-                            self.restore_state(next_checkpoint[2])
-                            self.update_frame(dt=0, force_draw=True)
-                        
-                finally:
-                    # Clear the flag
-                    self._processing_key = False
+            # Check if there's a next checkpoint to play
+            next_index = self.current_animation_index + 1
+            if next_index < len(self.animation_checkpoints):
+                # Play the next stored animation
+                success = self.play_next_animation(self.current_animation_index)
+                if not success:
+                    print("Failed to play next animation")
             else:
-                # Check if we have updated content to execute
-                if hasattr(self, '_updated_content') and self._updated_content:
-                    print("Playing next animation from updated file...")
-                    
-                    # Set flag to prevent re-entry
-                    self._processing_key = True
-                    try:
-                        # Play through the next animation
-                        played = self._play_through_next_animation()
-                        
-                        if not played:
-                            print("No more animations in updated file")
-                            self._updated_content = None  # Clear when truly done
-                    except Exception as e:
-                        print(f"Error playing next animation: {e}")
-                        import traceback
-                        traceback.print_exc()
-                    finally:
-                        self._processing_key = False
+                # No next checkpoint, run new animation from file
+                success = self.run_next_animation(self.current_animation_index)
+                if success:
+                    # run_next_animation creates a new checkpoint and updates index
+                    pass
                 else:
-                    print("Already at last animation")
+                    print("No more animations to run")
         
         # InteractiveScene key handlers
         char = chr(symbol) if symbol < 256 else ''
@@ -972,8 +777,91 @@ class Scene(GLScene):
         else:
             raise EndScene()
     
+    def edit_checkpoint(self, smallest_line_edit, largest_line_edit):
+        """
+        Handle file edits by finding affected checkpoints and re-executing.
+        
+        Args:
+            smallest_line_edit: First line that was edited
+            largest_line_edit: Last line that was edited
+        """
+        print(f"\n[EDIT] File changed at lines {smallest_line_edit}-{largest_line_edit}")
+        
+        # Find the checkpoint to restore to
+        # Start from the last checkpoint and work backwards
+        restore_checkpoint_index = -1
+        
+        for i in range(len(self.animation_checkpoints) - 1, -1, -1):
+            checkpoint = self.animation_checkpoints[i]
+            checkpoint_line = checkpoint[1]
+            
+            if checkpoint_line < smallest_line_edit:
+                # This checkpoint is before the edit, safe to restore to
+                restore_checkpoint_index = i
+                break
+        
+        print(f"[EDIT] Restoring to checkpoint {restore_checkpoint_index}")
+        
+        # Set current checkpoint
+        self.current_animation_index = restore_checkpoint_index
+        
+        # Delete all checkpoints after this index
+        if restore_checkpoint_index >= 0:
+            self.animation_checkpoints = self.animation_checkpoints[:restore_checkpoint_index + 1]
+            # Restore to this checkpoint's state
+            checkpoint = self.animation_checkpoints[restore_checkpoint_index]
+            self.restore_state(checkpoint[2])
+        else:
+            # No safe checkpoint, clear everything
+            self.animation_checkpoints = []
+            self.clear()
+        
+        print(f"[EDIT] Deleted checkpoints after index {restore_checkpoint_index}")
+        
+        # According to the spec, we should run animations until the checkpoint line
+        # is greater than largest_line_edit
+        # Since we just restored to a checkpoint before the edit, we need to run
+        # animations until we create a checkpoint past the edit region
+        
+        # Run ONE animation at a time and check
+        while True:
+            # Check if we should continue
+            if self.current_animation_index >= 0 and self.current_animation_index < len(self.animation_checkpoints):
+                current_checkpoint = self.animation_checkpoints[self.current_animation_index]
+                current_line = current_checkpoint[1]
+                
+                # If current checkpoint is already past the edit, we're done
+                if current_line > largest_line_edit:
+                    print(f"[EDIT] Current checkpoint at line {current_line} is past edit region")
+                    break
+            
+            # Run next animation
+            print(f"[EDIT] Running next animation...")
+            success = self.run_next_animation(self.current_animation_index)
+            
+            if not success:
+                # No more animations
+                print("[EDIT] No more animations to run")
+                break
+            
+            # Check the newly created checkpoint
+            if self.current_animation_index >= 0 and self.current_animation_index < len(self.animation_checkpoints):
+                new_checkpoint = self.animation_checkpoints[self.current_animation_index]
+                new_line = new_checkpoint[1]
+                print(f"[EDIT] Created checkpoint at line {new_line}")
+                
+                # If this checkpoint is past the edit region, we're done
+                if new_line > largest_line_edit:
+                    print(f"[EDIT] Checkpoint at line {new_line} is past edit region, done")
+                    break
+        
+        print("[EDIT] Edit checkpoint complete")
+        
+        # Force redraw
+        self.update_frame(dt=0, force_draw=True)
+    
     def _handle_file_change(self):
-        """Handle file change by replaying only affected animations."""
+        """Handle file change by using edit_checkpoint."""
         print("\nFile changed! Auto-reloading...")
         
         try:
@@ -994,83 +882,18 @@ class Scene(GLScene):
                 print("No changes detected")
                 return
             
-            print(f"Changed lines: {changed_ranges}")
-            print(f"Current checkpoints: {[(i, cp[1]) for i, cp in enumerate(self.animation_checkpoints)]}")
+            # Store updated content for run_next_animation to use
+            self._updated_content = new_content
             
-            # Simple approach: find the first checkpoint that might be affected
-            # by looking at which line numbers changed
-            first_affected_checkpoint = None
+            # Find smallest and largest edited lines
+            smallest_line_edit = min(start for start, end in changed_ranges)
+            largest_line_edit = max(end for start, end in changed_ranges)
             
-            # First, check for checkpoints with line numbers that match the changed lines
-            for i, checkpoint in enumerate(self.animation_checkpoints):
-                checkpoint_line = checkpoint[1]
-                # Check if this checkpoint is at or after any changed line
-                for start, end in changed_ranges:
-                    if checkpoint_line >= start:
-                        first_affected_checkpoint = i
-                        break
-                if first_affected_checkpoint is not None:
-                    break
-            
-            # If no match found and we have checkpoints with suspiciously low line numbers
-            # (indicating they were created from exec'd code), we need a different approach
-            if first_affected_checkpoint is None:
-                # Check if any checkpoint has a line number < 10 (likely from exec)
-                has_exec_checkpoints = any(cp[1] < 10 for cp in self.animation_checkpoints)
-                if has_exec_checkpoints:
-                    # Find the first checkpoint after the last "normal" checkpoint
-                    # These are likely the ones that need to be re-executed
-                    for i, checkpoint in enumerate(self.animation_checkpoints):
-                        if checkpoint[1] < 10:  # This is from exec'd code
-                            first_affected_checkpoint = i
-                            print(f"Found exec'd checkpoint at index {i}, will reload from there")
-                            break
-            
-            if first_affected_checkpoint is not None:
-                print(f"Change might affect animation at checkpoint {first_affected_checkpoint}")
-                
-                # Restore to checkpoint BEFORE the affected one
-                if first_affected_checkpoint > 0:
-                    restore_index = first_affected_checkpoint - 1
-                    restore_checkpoint = self.animation_checkpoints[restore_index]
-                    print(f"[RESTORE] Restoring to checkpoint {restore_index}")
-                    self.restore_state(restore_checkpoint[2])
-                    self.current_animation_index = restore_index
-                else:
-                    # First animation was affected, clear scene
-                    print("First animation affected, clearing scene")
-                    self.clear()
-                    self.current_animation_index = -1
-                
-                # Clear all checkpoints after the restore point
-                old_count = len(self.animation_checkpoints)
-                self.animation_checkpoints = self.animation_checkpoints[:first_affected_checkpoint]
-                print(f"Cleared checkpoints from {first_affected_checkpoint} to {old_count-1}")
-                
-                # Store the updated file content for later use
-                # Always overwrite any existing updated content with the latest
-                self._updated_content = new_content
-                
-                # Automatically play the next animation
-                print("Playing updated animation...")
-                played = self._play_through_next_animation()
-                if played:
-                    print("Updated animation played successfully")
-                    print(f"Current animation index: {self.current_animation_index}")
-                    print(f"Total checkpoints: {len(self.animation_checkpoints)}")
-                    # Keep _updated_content for potential RIGHT arrow navigation
-                else:
-                    print("Failed to play updated animation")
-                    # Clear if we couldn't play anything
-                    self._updated_content = None
-            else:
-                print("No animations affected by changes")
+            # Use edit_checkpoint to handle the changes
+            self.edit_checkpoint(smallest_line_edit, largest_line_edit)
             
             # Update stored content
             self._original_content = new_content
-            
-            # Force redraw
-            self.update_frame(dt=0, force_draw=True)
             
             print("Reload complete!")
             
@@ -1496,6 +1319,37 @@ class Scene(GLScene):
             frame = inspect.currentframe().f_back
             line_no = frame.f_lineno
             
+            # If we're running from exec'd code, adjust the line number
+            if '__line_offset__' in frame.f_locals:
+                line_no += frame.f_locals['__line_offset__']
+            
+            # For multi-line statements, we need to find the end line
+            # This is a bit tricky, but we can look at the source code
+            if hasattr(self, '_scene_filepath') and self._scene_filepath:
+                try:
+                    import ast
+                    # Use updated content if available, otherwise file content
+                    if hasattr(self, '_updated_content') and self._updated_content:
+                        source = ''.join(self._updated_content)
+                    else:
+                        with open(self._scene_filepath, 'r') as f:
+                            source = f.read()
+                    
+                    # Parse the source to find the actual end line
+                    tree = ast.parse(source)
+                    
+                    # Find the node that contains our line
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Call) and hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
+                            if node.lineno <= line_no <= (node.end_lineno or node.lineno):
+                                # Found our call, use the end line
+                                if node.end_lineno:
+                                    line_no = node.end_lineno
+                                break
+                except Exception as e:
+                    # If parsing fails, stick with the original line number
+                    pass
+            
             # Store the local variables from the calling frame
             caller_locals = {}
             for name, obj in frame.f_locals.items():
@@ -1553,6 +1407,36 @@ class Scene(GLScene):
             # Get the line number
             frame = inspect.currentframe().f_back
             line_no = frame.f_lineno
+            
+            # If we're running from exec'd code, adjust the line number
+            if '__line_offset__' in frame.f_locals:
+                line_no += frame.f_locals['__line_offset__']
+            
+            # For multi-line statements, we need to find the end line
+            if hasattr(self, '_scene_filepath') and self._scene_filepath:
+                try:
+                    import ast
+                    # Use updated content if available, otherwise file content
+                    if hasattr(self, '_updated_content') and self._updated_content:
+                        source = ''.join(self._updated_content)
+                    else:
+                        with open(self._scene_filepath, 'r') as f:
+                            source = f.read()
+                    
+                    # Parse the source to find the actual end line
+                    tree = ast.parse(source)
+                    
+                    # Find the node that contains our line
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Call) and hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
+                            if node.lineno <= line_no <= (node.end_lineno or node.lineno):
+                                # Found our call, use the end line
+                                if node.end_lineno:
+                                    line_no = node.end_lineno
+                                break
+                except Exception as e:
+                    # If parsing fails, stick with the original line number
+                    pass
             
             # Store the local variables from the calling frame
             caller_locals = {}
@@ -1666,6 +1550,248 @@ class Scene(GLScene):
     
     
     
+    
+    def run_next_animation(self, current_checkpoint):
+        """
+        Execute code from file starting after current checkpoint.
+        Blocks key interaction during execution.
+        Comments out all code up to and including checkpoint line.
+        Exits after playing one animation and updates checkpoint.
+        """
+        # Block key interaction
+        self._processing_key = True
+        
+        try:
+            # Get the file content
+            if not hasattr(self, '_scene_filepath') or not self._scene_filepath:
+                print("No scene file path available")
+                return False
+                
+            # Use updated content if available (from file change), otherwise current file
+            if hasattr(self, '_updated_content') and self._updated_content:
+                content = self._updated_content
+            else:
+                with open(self._scene_filepath, 'r') as f:
+                    content = f.readlines()
+            
+            # Determine the line to start after
+            if current_checkpoint >= 0 and current_checkpoint < len(self.animation_checkpoints):
+                checkpoint = self.animation_checkpoints[current_checkpoint]
+                start_after_line = checkpoint[1]  # line_number from checkpoint
+            else:
+                start_after_line = 0
+            
+            print(f"[RUN_NEXT] Starting after line {start_after_line}")
+            
+            # Extract code with commenting
+            code_to_execute = self._extract_code_with_comments(content, start_after_line)
+            
+            
+            # Check if we have any executable code after the comments
+            # Split by lines and check if any non-comment line exists
+            has_executable_code = False
+            for line in code_to_execute.split('\n'):
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#'):
+                    has_executable_code = True
+                    break
+            
+            if not has_executable_code:
+                print("Already at last animation")
+                return False
+            
+            # Set flags to execute only one animation
+            self._stop_after_one_animation = True
+            self._one_animation_executed = False
+            
+            # Create namespace
+            namespace = {'self': self}
+            exec("from maniml import *", namespace)
+            
+            # Add stored locals from current checkpoint if available
+            if current_checkpoint >= 0 and current_checkpoint < len(self.animation_checkpoints):
+                checkpoint = self.animation_checkpoints[current_checkpoint]
+                if len(checkpoint) > 3:
+                    namespace.update(checkpoint[3])  # caller_locals
+            
+            # Execute the code
+            # We need to compile with the correct filename and starting line
+            # to get accurate line numbers in stack traces
+            compiled = compile(code_to_execute, self._scene_filepath, 'exec')
+            
+            # Add a line offset to the namespace so checkpoints know the real line numbers
+            namespace['__line_offset__'] = start_after_line
+            
+            exec(compiled, namespace)
+            
+            # Check if we executed an animation
+            if self._one_animation_executed:
+                # Animation was executed and checkpoint created
+                return True
+            else:
+                print("No animation found in remaining code")
+                return False
+                
+        except Exception as e:
+            print(f"Error in run_next_animation: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            # Clean up flags
+            self._processing_key = False
+            if hasattr(self, '_stop_after_one_animation'):
+                delattr(self, '_stop_after_one_animation')
+            if hasattr(self, '_one_animation_executed'):
+                delattr(self, '_one_animation_executed')
+    
+    def play_next_animation(self, current_checkpoint):
+        """
+        Play the stored animation at the next checkpoint.
+        Blocks key interaction during playback.
+        Updates current_checkpoint after playing.
+        """
+        # Block key interaction
+        self._processing_key = True
+        
+        try:
+            next_index = current_checkpoint + 1
+            
+            if next_index >= len(self.animation_checkpoints):
+                print("No next animation to play")
+                return False
+            
+            next_checkpoint = self.animation_checkpoints[next_index]
+            
+            # Restore to state BEFORE this animation
+            if next_index > 0:
+                prev_checkpoint = self.animation_checkpoints[next_index - 1]
+                self.restore_state(prev_checkpoint[2])
+            
+            print(f"Playing animation {next_index + 1}/{len(self.animation_checkpoints)}")
+            
+            # Check if checkpoint has animation info
+            if len(next_checkpoint) > 4 and isinstance(next_checkpoint[4], dict):
+                animation_info = next_checkpoint[4]
+                
+                # Set navigating flag to prevent new checkpoints
+                self._navigating_animations = True
+                try:
+                    if animation_info['type'] == 'play':
+                        animations = animation_info['animations']
+                        kwargs = animation_info['kwargs']
+                        self.play(*animations, **kwargs)
+                    elif animation_info['type'] == 'wait':
+                        self.wait(
+                            duration=animation_info['duration'],
+                            stop_condition=animation_info['stop_condition'],
+                            frozen_frame=animation_info['frozen_frame']
+                        )
+                    
+                    # Update index after successful playback
+                    self.current_animation_index = next_index
+                    return True
+                    
+                finally:
+                    self._navigating_animations = False
+            else:
+                print("No animation info in checkpoint")
+                return False
+                
+        except Exception as e:
+            print(f"Error in play_next_animation: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            self._processing_key = False
+    
+    def jump_to_next_animation(self, current_checkpoint):
+        """
+        Jump to the next animation checkpoint without playing.
+        Updates current_checkpoint and restores state.
+        """
+        next_index = current_checkpoint + 1
+        
+        if next_index >= len(self.animation_checkpoints):
+            print("Already at last animation")
+            return current_checkpoint
+        
+        checkpoint = self.animation_checkpoints[next_index]
+        print(f"Jump to animation {next_index + 1}/{len(self.animation_checkpoints)}")
+        self.restore_state(checkpoint[2])
+        self.current_animation_index = next_index
+        self.update_frame(dt=0, force_draw=True)
+        
+        return next_index
+    
+    def jump_to_previous_animation(self, current_checkpoint):
+        """
+        Jump to the previous animation checkpoint without playing.
+        Updates current_checkpoint and restores state.
+        """
+        prev_index = current_checkpoint - 1
+        
+        if prev_index < 0:
+            print("Already at first animation")
+            return current_checkpoint
+        
+        checkpoint = self.animation_checkpoints[prev_index]
+        print(f"Jump to animation {prev_index + 1}/{len(self.animation_checkpoints)}")
+        self.restore_state(checkpoint[2])
+        self.current_animation_index = prev_index
+        self.update_frame(dt=0, force_draw=True)
+        
+        return prev_index
+    
+    def _extract_code_with_comments(self, content, comment_up_to_line):
+        """
+        Extract code from construct method, commenting out lines up to comment_up_to_line.
+        This prevents re-execution of animations that have already been played.
+        """
+        in_construct = False
+        code_lines = []
+        base_indent = None
+        actual_line_count = 0  # Track line numbers in extracted code
+        
+        for i, line in enumerate(content):
+            line_no = i + 1
+            
+            if 'def construct(self):' in line:
+                in_construct = True
+                base_indent = len(line) - len(line.lstrip())
+                continue
+            
+            if in_construct:
+                # Check if we've exited construct
+                if line.strip() and not line[base_indent:].startswith(' '):
+                    break
+                
+                # Include all lines, even empty ones, to preserve structure
+                if 'interactive_embed' not in line:
+                    actual_line_count += 1
+                    
+                    # Remove the base indentation
+                    if len(line) > base_indent + 4:
+                        dedented = line[base_indent + 4:]  # +4 for method body indent
+                    else:
+                        dedented = line[base_indent:] if len(line) > base_indent else line
+                    
+                    # Comment out lines up to and including comment_up_to_line
+                    if line_no <= comment_up_to_line and line.strip():
+                        # Keep original indentation when commenting
+                        # Find the amount of leading whitespace after dedenting
+                        leading_spaces = len(dedented) - len(dedented.lstrip())
+                        comment_prefix = ' ' * leading_spaces + '# Already executed: '
+                        dedented = comment_prefix + dedented.strip() + '\n'
+                    
+                    # Add a special marker for the line we start from
+                    if line_no == comment_up_to_line + 1:
+                        code_lines.append(f"__line_offset__ = {line_no - actual_line_count}  # Line offset for checkpoints\n")
+                    
+                    code_lines.append(dedented)
+        
+        return ''.join(code_lines)
     
     def tear_down(self):
         """Clean up file watcher on scene end."""
