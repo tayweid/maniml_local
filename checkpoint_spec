@@ -1,0 +1,120 @@
+CHECKPOINT GOALS
+
+The main goal of the checkpoint system is to make it much easier to test and iterate on manim animations. It opens a preview window of the animations, allow navigating through animations, quickly jumping through animations, and hot reloading animations that have been updated in the source file. 
+
+Only play() creates checkpoints. The wait() method does not create new checkpoints.
+
+
+CHECKPOINT DESCRIPTION
+
+When the program runs, it initiates the first checkpoint which is just a plank screen with no mobjects, then runs the first animation and saves a checkpoint.
+
+If we’re at the furthest checkpoint, then we can just run the after_current_checkpoint_code. This uses sends the commented out code to exec, animates one animation, and creates a checkpoint. 
+
+If we're tight (never gone backward) and need to create a new animation, we just run the code.
+
+If we're slack (have gone backward at least once) and need to create a new animation, we rerun the code up to that point without animation, then run the code.
+
+If we're playing to an existing checkpoint, we start with the previous checkpoint state and then use the information in the current checkpoint to make the animation.
+
+If we're jumping to an existing checkpoint, we just use the checkpoint state.
+
+If we edit the file, watcher finds the earliest edited line, finds the checkpoint right before that line, and plays forward from there. 
+
+
+CHECKPOINT OVERVIEW
+
+def start():
+	# Initiate blank screen with no mobjects as checkpoint 0
+	setup_checkpoint_zero()
+
+	# Play first animation
+	run_next_code(current_checkpoint)
+	pass
+
+def run_next_code():
+	# Use current_checkpoint to comment out used lines
+
+	# Send code to exec to play next animation
+	current_last_line_number = checkpoints[current_checkpoint][line_number]
+	code = comment_out_to_line(current_last_line_number)
+	run_exec(code, namespace, animations=True)
+
+def run_exec(code, namespace, animations=True):
+	# Send code to exec with animations turned on by default
+
+def comment_out_to_line(line):
+	# Comment out or delete the code upto and including line
+
+def play_forward():
+	# Use the existing next checkpoint's animation to animate forward
+
+	tight = False
+
+def reexecute():
+	# Run all code without animation up through some line number
+
+	# Send code to exec
+	code = code_upto_line(line)
+	run_exec(code, namespace, animations=False)
+
+	tight = True
+
+def right_arrow():
+	# Runs on right arrow key
+
+	# Update checkpoint
+	current_checkpoint += 1
+
+	# If there's a next checkpoint, play it
+	if checkpoints[current_checkpoint]:
+		play_forward()
+
+	# If there's not a next checkpoint, create it
+	else:
+		if not tight:
+			reexecute()
+		run_next_code()
+
+def down_arrow():
+	# Runs on down arrow key
+	# Use the existing next checkpoint's final state to jump forward
+
+	# If there's a next checkpoint, jump to it
+	if checkpoints[current_checkpoint+1]:
+		play_forward()
+
+	# If there's not a next checkpoint, create it
+	else:
+		if not tight:
+			reexecute()
+		run_next_code()
+
+def jump_to():
+	# Jump to checkpoint
+
+	tight = False
+
+def jump_back():
+	# Runs on left arrow key or up arrow key
+	# Use the existing previous checkpoint's final state to jump back
+
+	current_checkpoint -= 1
+	jump_to(current_checkpoint)
+
+def on_edit():
+	# Runs when watcher detects an edit
+
+	# Find the last unchanged checkpoint (could be checkpoint 0)
+
+	# Set current_checkpoint = last_uneditted_checkpoint
+
+	# reexecute up to checkpoints[current_checkpoint][line_number]
+
+	run_next_code(current_checkpoint)
+
+
+AI INSTRUCTIONS
+
+These functions aren't complete but serve as a framework. Nearly all of the code required to write the functions is already in the codebase under different names. Use existing code in maniml as a guide. Use the function names I've given and fill in with 
+

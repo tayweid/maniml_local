@@ -378,6 +378,17 @@ class Scene(GLScene):
         # Call parent setup
         super().setup()
         
+        # Create initial blank checkpoint if we haven't already
+        if not self.animation_checkpoints:
+            self.animation_checkpoints.append((
+                0,                    # index
+                0,                    # line_no (before any code)
+                self.get_state(),     # blank scene state
+                {},                   # no locals
+                None                  # no animation info
+            ))
+            self.current_animation_index = 0
+        
         # Setup file watching if enabled
         if SimpleFileWatcher and self.auto_reload_enabled:
             # Use the filepath that was passed from __main__.py
@@ -1733,8 +1744,12 @@ class Scene(GLScene):
                 prev_checkpoint = self.animation_checkpoints[next_index - 1]
                 self.restore_state(prev_checkpoint[2])
             else:
-                # First animation - clear the scene
-                self.clear()
+                # First animation - restore to initial blank checkpoint
+                if self.animation_checkpoints:
+                    self.restore_state(self.animation_checkpoints[0][2])
+                else:
+                    # Fallback if no checkpoints exist
+                    self.clear()
             
             print(f"Playing animation {next_index + 1}/{len(self.animation_checkpoints)}")
             
@@ -1832,8 +1847,18 @@ class Scene(GLScene):
         
         checkpoint = self.animation_checkpoints[prev_index]
         print(f"Jump to animation {prev_index + 1}/{len(self.animation_checkpoints)}")
+        
+        # Set flag if we're jumping to checkpoint 0
+        if prev_index == 0:
+            self._restoring_to_zero = True
+        
         self.restore_state(checkpoint[2])
         self.current_animation_index = prev_index
+        
+        # Clear the flag
+        if hasattr(self, '_restoring_to_zero'):
+            delattr(self, '_restoring_to_zero')
+        
         self.update_frame(dt=0, force_draw=True)
         
         return prev_index
@@ -2317,6 +2342,14 @@ class Scene(GLScene):
         ])
 
     def restore_state(self, scene_state):
+        # Special handling for checkpoint 0 (blank state)
+        # When restoring to the initial blank checkpoint, ensure we clear all mobjects
+        if self.current_animation_index == 0 or (hasattr(self, '_restoring_to_zero') and self._restoring_to_zero):
+            # Clear all mobjects except unselectables
+            mobjects_to_remove = [m for m in self.mobjects if m not in self.unselectables]
+            for mob in mobjects_to_remove:
+                self.remove(mob)
+        
         super().restore_state(scene_state)
         if hasattr(self, 'selection_highlight') and self.selection_highlight:
             self.mobjects.insert(0, self.selection_highlight)

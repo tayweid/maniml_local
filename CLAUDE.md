@@ -21,6 +21,9 @@ This allows existing ManimCE code to run with 10-20x performance improvements.
 # Standard usage (always opens preview window)
 maniml script.py SceneName
 
+# Alternative: run as module
+python -m maniml script.py SceneName
+
 # Run with auto-reload for development
 maniml script.py SceneName --autoreload
 
@@ -62,6 +65,9 @@ flake8 maniml/
 ```bash
 # Install in development mode
 pip install -e .
+
+# Install with dev dependencies
+pip install -e .[dev]
 
 # Alternative setup script
 ./setup.sh
@@ -151,6 +157,11 @@ class TestScene(Scene):
         
         # Verify state
         self.wait()
+```
+
+Run test scenes directly:
+```bash
+python -m maniml test_file.py TestScene
 ```
 
 ### Integration Testing

@@ -1,0 +1,41 @@
+
+------------------------ OLD ------------------------
+
+
+Checkpoint system structure:
+
+Checkpoints contain: 
+1. index (animation number)
+2. line_number (the last line where play() was called, so if it’s multiple lines, it’s the last line)
+3. state: SceneState with mobject copies
+4. animation_info: Details about the animation for replay
+
+
+Hot Reloading:
+
+Running python -m maniml test_simple.py TestSimple runs maniml. This:
+1. Reads test_simple.py into current_code.
+2. Starts a file watcher to check for edits to test_simple.py.
+3. Opens the window.
+5. Sets current_checkpoint = 0.
+4. Plays run_next_animation(current_checkpoint).
+
+The function jump_to_animation(checkpoint) selects all code up to and including the line number, sends it to exec() to run without animation, jumping to the checkpoint. 
+
+The function run_next_animation(current_checkpoint) blocks key interaction during run, uses current_checkpoint and checks the line_number. It then runs jump_to_animation(current_checkpoint). It then takes all the code, comments out all code up to and including that line number, sends that code to exec() to execute with animation. If there’s code to run it runs the code. If it plays an animation it exits after playing one animation, updates current_checkpoint+=1, stores that animation in checkpoint at the new current_checkpoint. If there’s no animation, it exits after running all code. If there’s no code it prints(’Already at last animation’).
+
+The function play_next_animation(current_checkpoint) blocks key interaction during run, uses current_checkpoint, plays the stored animation in animation_info, and updates current_checkpoint+=1.
+
+The right arrow runs right_arrow(current_checkpoint), which runs run_next_animation(current_checkpoint). 
+
+The down arrow runs down_arrow(current_checkpoint), which runs jump_to_next_animation(current_checkpoint).
+
+The function jump_to_next_animation(current_checkpoint) sets current_checkpoint += 1, then runs jump_to_animation(current_checkpoint) on the new checkpoint. 
+
+The left arrow and up arrow run jump_to_previous_animation(current_checkpoint).
+
+The function jump_to_previous_animation(current_checkpoint) sets current_checkpoint -= 1, then runs jump_to_animation(current_checkpoint) on the new checkpoint. 
+
+When the file watcher detects an edit to test_simple.py, it finds the smallest line that’s been edited, smallest_line_edit, and the largest line that’s been edited, largest_line_edit, and runs edit_checkpoint(current_checkpoint, smallest_line_edit, largest_line_edit).
+
+The function edit_checkpoint(smallest_line_edit, largest_line_edit) starts with the last checkpoint, and checks whether the checkpoint’s line_number is greater than smallest_line_edit, and continues backward until a checkpoint’s line_number is less than smallest_line_edit. Then current_checkpoint is set to this checkpoint’s index, jump_to_animation(current_checkpoint) is run on this new checkpoint, then all checkpoints with indexes greater than this new current_checkpoint are deleted entirely, and then run_next_animation(current_checkpoint) is run until the line_number of the current_checkpoint is greater than largest_line_edit. 
