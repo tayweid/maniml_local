@@ -164,6 +164,8 @@ Run test scenes directly:
 python -m maniml test_file.py TestScene
 ```
 
+This is the preferred way to run test scenes as it ensures proper module loading.
+
 ### Integration Testing
 - Located in `tests/integration/`
 - Tests full animation rendering

@@ -1,0 +1,294 @@
+Checkpoint System Implementation Plan
+
+Overview
+
+The checkpoint system enables navigation through animations with proper
+ state synchronization. Based on the existing scene.py code and the 
+checkpoint_spec, we'll reorganize the functionality into a cleaner, 
+more maintainable structure.
+
+Core State Management
+
+Scene State Variables
+
+# Checkpoint storage
+self.checkpoints = []  # List of checkpoints
+self.current_checkpoint = -1  # Current position in checkpoint list
+self.tight = True  # Whether we can execute directly or need 
+re-execution
+
+# File watching
+self._scene_filepath = None
+self._original_content = None
+self._updated_content = None
+self._file_changed_flag = False
+
+Checkpoint Structure
+
+Each checkpoint contains:
+(
+    index,           # Checkpoint number
+    line_number,     # Source line where play() was called
+    scene_state,     # SceneState object with mobject copies
+    locals_dict,     # Local variables at this point
+    animation_info   # Details for replay without re-execution
+)
+
+Required Functions
+
+1. Initialization and Setup
+
+start()
+
+def start(self):
+    """Initialize the checkpoint system with blank screen as checkpoint
+ 0."""
+    # Create initial blank checkpoint
+    self.checkpoints = [(0, 0, self.get_state(), {}, None)]
+    self.current_checkpoint = 0
+    self.tight = True
+    
+    # Setup file watching if enabled
+    if self.auto_reload_enabled:
+        self.setup_file_watcher()
+    
+    # Run first animation
+    self.run_next_code()
+
+2. Code Execution Functions
+
+run_next_code()
+
+def run_next_code(self):
+    """Execute code after current checkpoint to create next 
+animation."""
+    # Get current checkpoint line number
+    current_line = self.checkpoints[self.current_checkpoint][1]
+    
+    # Extract code with comments up to current line
+    code = self.comment_out_to_line(current_line)
+    
+    # Execute code with animation enabled
+    self.run_exec(code, self.get_namespace(), animations=True)
+
+run_exec(code, namespace, animations=True)
+
+def run_exec(self, code, namespace, animations=True):
+    """Execute code with optional animation suppression."""
+    # Set flags for animation control
+    if not animations:
+        self._skip_animations = True
+    
+    try:
+        # Compile and execute
+        compiled = compile(code, self._scene_filepath, 'exec')
+        exec(compiled, namespace)
+    finally:
+        if not animations:
+            self._skip_animations = False
+
+reexecute()
+
+def reexecute(self):
+    """Re-run all code up to current checkpoint without animations."""
+    # Get line number to execute up to
+    checkpoint_line = self.checkpoints[self.current_checkpoint][1]
+    
+    # Extract code up to that line
+    code = self.code_upto_line(checkpoint_line)
+    
+    # Run without animations
+    self.run_exec(code, self.get_namespace(), animations=False)
+    
+    # Mark as tight since we're caught up
+    self.tight = True
+
+3. Code Extraction Functions
+
+comment_out_to_line(line)
+
+def comment_out_to_line(self, line):
+    """Extract construct body with lines up to 'line' commented out."""
+    # Uses existing _extract_code_with_comments logic
+    # Comments out all play() calls up to specified line
+    # Preserves line numbers for debugging
+
+code_upto_line(line)
+
+def code_upto_line(self, line):
+    """Extract construct body code up to specified line."""
+    # Uses existing _extract_code_up_to_line logic
+    # Returns executable code without comments
+
+get_namespace()
+
+def get_namespace(self):
+    """Get execution namespace with current checkpoint's locals."""
+    namespace = {'self': self}
+    exec("from maniml import *", namespace)
+    
+    # Add stored locals from current checkpoint
+    if 0 <= self.current_checkpoint < len(self.checkpoints):
+        stored_locals = self.checkpoints[self.current_checkpoint][3]
+        namespace.update(stored_locals)
+    
+    return namespace
+
+4. Navigation Functions
+
+play_forward()
+
+def play_forward(self):
+    """Play animation at next checkpoint using stored animation 
+info."""
+    next_checkpoint = self.checkpoints[self.current_checkpoint + 1]
+    
+    # Restore to state BEFORE the animation
+    self.restore_state(self.checkpoints[self.current_checkpoint][2])
+    
+    # Get stored animation info
+    anim_info = next_checkpoint[4]
+    if anim_info and anim_info['type'] == 'play':
+        # Remap mobjects and play animations
+        animations = self.remap_stored_animations(anim_info)
+        self.play(*animations, **anim_info['kwargs'])
+    
+    # Update position
+    self.current_checkpoint += 1
+    self.tight = False
+
+jump_to(checkpoint_index)
+
+def jump_to(self, checkpoint_index):
+    """Jump instantly to a checkpoint's final state."""
+    checkpoint = self.checkpoints[checkpoint_index]
+    self.restore_state(checkpoint[2])
+    self.current_checkpoint = checkpoint_index
+    self.tight = False
+    self.update_frame(force_draw=True)
+
+jump_back()
+
+def jump_back(self):
+    """Jump to previous checkpoint (called by left/up arrow)."""
+    if self.current_checkpoint > 0:
+        self.current_checkpoint -= 1
+        self.jump_to(self.current_checkpoint)
+
+5. Arrow Key Handlers
+
+right_arrow()
+
+def right_arrow(self):
+    """Handle right arrow - play next animation."""
+    self.current_checkpoint += 1
+    
+    # Check if next checkpoint exists
+    if self.current_checkpoint < len(self.checkpoints):
+        self.play_forward()
+    else:
+        # Need to create new checkpoint
+        if not self.tight:
+            self.reexecute()
+        self.run_next_code()
+
+down_arrow()
+
+def down_arrow(self):
+    """Handle down arrow - jump to next checkpoint."""
+    if self.current_checkpoint + 1 < len(self.checkpoints):
+        self.current_checkpoint += 1
+        self.jump_to(self.current_checkpoint)
+    else:
+        # Create new checkpoint
+        if not self.tight:
+            self.reexecute()
+        self.run_next_code()
+
+6. Edit Handling
+
+on_edit()
+
+def on_edit(self):
+    """Handle file edits by finding affected checkpoints."""
+    # Find changed line ranges
+    changes = self.find_changed_lines()
+    smallest_edit = min(start for start, end in changes)
+    
+    # Find last unedited checkpoint
+    for i in range(len(self.checkpoints)-1, -1, -1):
+        if self.checkpoints[i][1] < smallest_edit:
+            self.current_checkpoint = i
+            break
+    else:
+        self.current_checkpoint = -1
+    
+    # Restore and re-execute
+    if self.current_checkpoint >= 0:
+        self.jump_to(self.current_checkpoint)
+        self.reexecute()
+    
+    self.run_next_code()
+
+7. Animation Remapping
+
+remap_stored_animations(anim_info)
+
+def remap_stored_animations(self, anim_info):
+    """Remap stored animations to current scene mobjects."""
+    # Create type-based mapping of scene mobjects
+    # Map stored mobject references to current ones
+    # Return fresh animation copies with updated references
+
+8. Enhanced play() Method
+
+The existing play() method already captures checkpoints, but needs 
+minor updates:
+- Store animation objects for replay
+- Capture local variables without deep copying mobjects
+- Use SceneState for efficient mobject storage
+
+Integration with Existing Code
+
+What to Keep:
+
+- SceneState class and its optimization strategy
+- Basic checkpoint structure in animation_checkpoints
+- File watching infrastructure
+- Code extraction methods (rename for clarity)
+
+What to Refactor:
+
+- Consolidate navigation methods to match spec names
+- Separate tight/slack state tracking
+- Cleaner separation of code execution modes
+- More consistent error handling
+
+What to Add:
+
+- Explicit tight/slack state variable
+- start() initialization method
+- Cleaner namespace management
+- Better animation remapping logic
+
+Benefits of This Architecture
+
+1. Clear Separation of Concerns: Each function has a single, 
+well-defined purpose
+2. Efficient State Management: Uses ManimGL's optimized SceneState
+3. Predictable Navigation: Tight/slack states make behavior explicit
+4. Robust Error Recovery: Clean handling of file edits and syntax 
+errors
+5. Memory Efficient: Reuses unchanged mobject copies between states
+
+Implementation Order
+
+1. First, implement the basic structure (start, state variables)
+2. Add code extraction functions
+3. Implement navigation functions
+4. Connect arrow key handlers
+5. Add edit handling
+6. Test and refine animation remapping
+
+This plan maintains all the existing functionality while reorganizing 
+it into the cleaner structure from the spec.
