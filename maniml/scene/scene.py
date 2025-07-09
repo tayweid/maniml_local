@@ -656,6 +656,17 @@ class Scene(GLScene):
         stored_locals = next_checkpoint[4]  # locals are at index 4
         
         if anim_info and anim_info['type'] == 'play' and 'animation_specs' in anim_info:
+            # Check if any animations are complex (like _MethodAnimation)
+            has_complex_animations = any(
+                spec['class_name'] in ['_MethodAnimation', '_AnimateFromAlpha']
+                for spec in anim_info['animation_specs']
+            )
+            
+            if has_complex_animations:
+                # Fallback to re-execution for complex animations
+                print("Complex animation detected, re-executing code")
+                return self.run_next_animation(self.current_checkpoint)
+            
             # Set navigating flag to prevent new checkpoints
             self._navigating_animations = True
             try:
@@ -1802,16 +1813,23 @@ class Scene(GLScene):
                 if hasattr(anim, 'target_mobject') and anim.target_mobject:
                     spec['target_mobject_name'] = self.get_mobject_name(anim.target_mobject, caller_locals)
                 
-                # Try to get animation kwargs
-                if hasattr(anim, 'kwargs'):
-                    spec['kwargs'] = anim.kwargs
-                else:
-                    # Extract basic animation parameters
+                # Handle special animation types
+                if spec['class_name'] == '_MethodAnimation':
+                    # For _MethodAnimation, we'll just mark it as complex
+                    # and let it be re-executed rather than recreated
+                    spec['is_complex'] = True
                     spec['kwargs'] = {}
-                    if hasattr(anim, 'run_time'):
-                        spec['kwargs']['run_time'] = anim.run_time
-                    if hasattr(anim, 'rate_func'):
-                        spec['kwargs']['rate_func'] = anim.rate_func
+                else:
+                    # Try to get animation kwargs
+                    if hasattr(anim, 'kwargs'):
+                        spec['kwargs'] = anim.kwargs
+                    else:
+                        # Extract basic animation parameters
+                        spec['kwargs'] = {}
+                        if hasattr(anim, 'run_time'):
+                            spec['kwargs']['run_time'] = anim.run_time
+                        if hasattr(anim, 'rate_func'):
+                            spec['kwargs']['rate_func'] = anim.rate_func
                 
                 animation_specs.append(spec)
             
