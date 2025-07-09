@@ -569,146 +569,16 @@ class Scene(GLScene):
         
         return namespace
     
-    def get_mobject_name(self, mobject, locals_dict):
-        """Find the variable name for a mobject in the locals dict."""
-        for name, obj in locals_dict.items():
-            if obj is mobject and not name.startswith('_'):
-                return name
-        # If not found, generate a unique identifier
-        return f"_mob_{id(mobject)}"
-    
-    def get_animation_class(self, class_name):
-        """Get animation class from its name."""
-        # Import all animation classes using the same imports as __init__.py
-        from maniml import (
-            Create, Write, DrawBorderThenFill, ShowCreation, Uncreate,
-            FadeIn, FadeOut, FadeInFrom, FadeOutAndShift,
-            Transform, ReplacementTransform, TransformFromCopy, MoveToTarget,
-            GrowFromPoint, GrowFromCenter, GrowFromEdge,
-            Indicate, FocusOn, Flash, CircleIndicate,
-            Rotate, Rotating
-        )
-        
-        # Build animation class map
-        animation_classes = {
-            'Create': Create,
-            'Write': Write,
-            'DrawBorderThenFill': DrawBorderThenFill,
-            'ShowCreation': ShowCreation,
-            'Uncreate': Uncreate,
-            'FadeIn': FadeIn,
-            'FadeOut': FadeOut,
-            'Transform': Transform,
-            'ReplacementTransform': ReplacementTransform,
-            'TransformFromCopy': TransformFromCopy,
-            'Rotate': Rotate,
-            'GrowFromPoint': GrowFromPoint,
-            'GrowFromCenter': GrowFromCenter,
-            'GrowFromEdge': GrowFromEdge,
-            'Indicate': Indicate,
-            'FocusOn': FocusOn,
-            'Flash': Flash,
-            'CircleIndicate': CircleIndicate,
-            'Rotating': Rotating,
-            'MoveToTarget': MoveToTarget,
-            'FadeInFrom': FadeInFrom,
-            'FadeOutAndShift': FadeOutAndShift,
-        }
-        
-        if class_name in animation_classes:
-            return animation_classes[class_name]
-        
-        # For internal animation classes (used by .animate syntax)
-        if class_name == '_AnimateFromAlpha':
-            from maniml.manimgl_core.mobject.mobject import _AnimateFromAlpha
-            return _AnimateFromAlpha
-        
-        if class_name == '_MethodAnimation':
-            from maniml.manimgl_core.mobject.mobject import _MethodAnimation
-            return _MethodAnimation
-        
-        # Try to get from frame's namespace (where user code runs)
-        import inspect
-        frame = inspect.currentframe()
-        while frame:
-            if class_name in frame.f_globals:
-                return frame.f_globals[class_name]
-            frame = frame.f_back
-        
-        raise ValueError(f"Animation class '{class_name}' not found")
-    
     def play_forward(self):
-        """Play animation at next checkpoint using stored animation info."""
+        """Play animation at next checkpoint by re-executing code."""
         next_index = self.current_checkpoint + 1
         
         if next_index >= len(self.checkpoints):
             print("No next animation to play")
             return False
             
-        next_checkpoint = self.checkpoints[next_index]
-        
-        # Restore to START state of this animation
-        start_state = next_checkpoint[2]  # start_state is at index 2
-        self.restore_state(start_state)
-        
-        # Get stored animation info
-        anim_info = next_checkpoint[5]  # animation_info is now at index 5
-        stored_locals = next_checkpoint[4]  # locals are at index 4
-        
-        if anim_info and anim_info['type'] == 'play' and 'animation_specs' in anim_info:
-            # Check if any animations are complex (like _MethodAnimation)
-            has_complex_animations = any(
-                spec['class_name'] in ['_MethodAnimation', '_AnimateFromAlpha']
-                for spec in anim_info['animation_specs']
-            )
-            
-            if has_complex_animations:
-                # Fallback to re-execution for complex animations
-                print("Complex animation detected, re-executing code")
-                return self.run_next_animation(self.current_checkpoint)
-            
-            # Set navigating flag to prevent new checkpoints
-            self._navigating_animations = True
-            try:
-                # Recreate animations from specs
-                animations = []
-                for spec in anim_info['animation_specs']:
-                    # Get the animation class
-                    anim_class = self.get_animation_class(spec['class_name'])
-                    
-                    # Get the mobject from stored locals
-                    mobject_name = spec.get('mobject_name')
-                    if mobject_name and mobject_name in stored_locals:
-                        mobject = stored_locals[mobject_name]
-                        
-                        # Handle animations with target mobjects (like Transform)
-                        target_name = spec.get('target_mobject_name')
-                        if target_name and target_name in stored_locals:
-                            target = stored_locals[target_name]
-                            anim = anim_class(mobject, target, **spec.get('kwargs', {}))
-                        else:
-                            anim = anim_class(mobject, **spec.get('kwargs', {}))
-                        
-                        animations.append(anim)
-                    else:
-                        print(f"Warning: Could not find mobject '{mobject_name}' for {spec['class_name']}")
-                
-                # Play the recreated animations
-                play_kwargs = anim_info.get('play_kwargs', {})
-                self.play(*animations, **play_kwargs)
-                
-                # After playing, we should naturally be at the end state
-                # Update position
-                self.current_checkpoint = next_index
-                self.current_animation_index = next_index  # Legacy support
-                self.tight = False
-                return True
-            finally:
-                self._navigating_animations = False
-        else:
-            # Fallback to re-execution
-            print("No animation info - re-executing code")
-            return self.run_next_animation(self.current_checkpoint)
+        # Always use re-execution approach
+        return self.run_next_animation(self.current_checkpoint)
     
     def jump_to(self, checkpoint_index):
         """Jump instantly to a checkpoint's final state."""
@@ -1790,58 +1660,25 @@ class Scene(GLScene):
                 if not name.startswith('_') and name != 'self':
                     caller_locals[name] = obj
             
-            # Store animation creation specs instead of objects
-            # First, convert any _AnimationBuilder objects to actual animations
+            # Convert any _AnimationBuilder objects to actual animations
             from maniml.manimgl_core.mobject.mobject import _AnimationBuilder
-            animation_specs = []
-            built_animations = []  # We still need to play these
+            built_animations = []
             
             for anim in animations:
                 if isinstance(anim, _AnimationBuilder):
                     # Build the actual animation from the builder
                     anim = anim.build()
-                
                 built_animations.append(anim)
-                
-                # Create spec for recreating this animation
-                spec = {
-                    'class_name': type(anim).__name__,
-                    'mobject_name': self.get_mobject_name(anim.mobject, caller_locals) if hasattr(anim, 'mobject') else None,
-                }
-                
-                # Store any additional mobjects (like target_mobject for Transform)
-                if hasattr(anim, 'target_mobject') and anim.target_mobject:
-                    spec['target_mobject_name'] = self.get_mobject_name(anim.target_mobject, caller_locals)
-                
-                # Handle special animation types
-                if spec['class_name'] == '_MethodAnimation':
-                    # For _MethodAnimation, we'll just mark it as complex
-                    # and let it be re-executed rather than recreated
-                    spec['is_complex'] = True
-                    spec['kwargs'] = {}
-                else:
-                    # Try to get animation kwargs
-                    if hasattr(anim, 'kwargs'):
-                        spec['kwargs'] = anim.kwargs
-                    else:
-                        # Extract basic animation parameters
-                        spec['kwargs'] = {}
-                        if hasattr(anim, 'run_time'):
-                            spec['kwargs']['run_time'] = anim.run_time
-                        if hasattr(anim, 'rate_func'):
-                            spec['kwargs']['rate_func'] = anim.rate_func
-                
-                animation_specs.append(spec)
-            
-            animation_info = {
-                'type': 'play',
-                'animation_specs': animation_specs,  # Store creation specs
-                'play_kwargs': kwargs,  # kwargs passed to play()
-                'line_no': line_no,
-            }
             
             # Replace animations with built ones for actual playback
             animations = built_animations
+            
+            # Store basic animation info for debugging
+            animation_info = {
+                'type': 'play',
+                'line_no': line_no,
+                'num_animations': len(animations),
+            }
         
         # Capture start state BEFORE playing animation
         if not is_navigating:
@@ -1888,7 +1725,7 @@ class Scene(GLScene):
                     line_no, 
                     end_state,      # Legacy system only stores end state
                     caller_locals,
-                    animation_info
+                    animation_info if animation_info else None
                 ))
                 print(f"[CHECKPOINT] Created checkpoint {self.current_checkpoint} at line {line_no}, total: {len(self.checkpoints)}")
             
