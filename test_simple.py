@@ -10,7 +10,7 @@ class TestSimple(Scene):
         self.play(Create(circle))
 
         # Animation 2  
-        self.play(Create(square))
+        self.play(FadeIn(square))
         
         # Animation 3 - Move objects
         self.play(

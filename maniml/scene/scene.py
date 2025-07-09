@@ -820,6 +820,10 @@ class Scene(GLScene):
         # Since we just restored to a checkpoint before the edit, we need to run
         # animations until we create a checkpoint past the edit region
         
+        # Set a flag to indicate we're in edit mode
+        # This will prevent using stale locals during re-execution
+        self._in_edit_mode = True
+        
         # Special case: if we're already at a checkpoint that ends within the edit region,
         # we need to re-run just that animation
         if restore_checkpoint_index >= 0 and restore_checkpoint_index < len(self.animation_checkpoints):
@@ -866,6 +870,9 @@ class Scene(GLScene):
                     break
         
         print("[EDIT] Edit checkpoint complete")
+        
+        # Clear edit mode flag
+        self._in_edit_mode = False
         
         # Force redraw
         self.update_frame(dt=0, force_draw=True)
@@ -1329,6 +1336,10 @@ class Scene(GLScene):
         - caller_locals: Dict of local variables (deepcopied when possible)
         - animation_info: Dict with animation details for replay
         """
+        # Skip animations if we're in setup mode (for edit handling)
+        if hasattr(self, '_skip_animations') and self._skip_animations:
+            return animations[0] if animations else None
+        
         is_navigating = hasattr(self, '_navigating_animations') and self._navigating_animations
         
         # Check if we should stop after one animation (hot reload)
@@ -1604,12 +1615,30 @@ class Scene(GLScene):
             exec("from maniml import *", namespace)
             
             # Add stored locals from current checkpoint if available
-            if current_checkpoint >= 0 and current_checkpoint < len(self.animation_checkpoints):
-                checkpoint = self.animation_checkpoints[current_checkpoint]
-                if len(checkpoint) > 3:
-                    stored_locals = checkpoint[3]
-                    for name, obj in stored_locals.items():
-                        namespace[name] = obj
+            # BUT skip this if we're in edit mode to avoid stale mobject references
+            if not hasattr(self, '_in_edit_mode') or not self._in_edit_mode:
+                if current_checkpoint >= 0 and current_checkpoint < len(self.animation_checkpoints):
+                    checkpoint = self.animation_checkpoints[current_checkpoint]
+                    if len(checkpoint) > 3:
+                        stored_locals = checkpoint[3]
+                        for name, obj in stored_locals.items():
+                            namespace[name] = obj
+            else:
+                # In edit mode, we need to execute code up to the checkpoint to define variables
+                # but WITHOUT playing animations
+                if current_checkpoint >= 0 and current_checkpoint < len(self.animation_checkpoints):
+                    checkpoint = self.animation_checkpoints[current_checkpoint]
+                    checkpoint_line = checkpoint[1]
+                    
+                    # Extract and execute code up to the checkpoint line without animations
+                    setup_code = self._extract_code_up_to_line(content, checkpoint_line)
+                    if setup_code:
+                        # Temporarily disable animations
+                        self._skip_animations = True
+                        try:
+                            exec(compile(setup_code, self._scene_filepath, 'exec'), namespace)
+                        finally:
+                            self._skip_animations = False
             
             # Execute the code
             # We need to compile with the correct filename and starting line
@@ -1808,6 +1837,40 @@ class Scene(GLScene):
         self.update_frame(dt=0, force_draw=True)
         
         return prev_index
+    
+    def _extract_code_up_to_line(self, content, up_to_line):
+        """
+        Extract code from construct method up to the specified line.
+        Used in edit mode to define variables without playing animations.
+        """
+        in_construct = False
+        code_lines = []
+        base_indent = None
+        
+        for i, line in enumerate(content):
+            line_no = i + 1
+            
+            if 'def construct(self):' in line:
+                in_construct = True
+                base_indent = len(line) - len(line.lstrip())
+                continue
+            
+            if in_construct:
+                # Check if we've exited construct
+                if line.strip() and not line[base_indent:].startswith(' '):
+                    break
+                
+                # Stop at the specified line
+                if line_no > up_to_line:
+                    break
+                
+                # Include this line
+                if line.strip() and 'interactive_embed' not in line:
+                    # Remove the base indentation
+                    dedented = line[base_indent + 4:]  # +4 for method body indent
+                    code_lines.append(dedented)
+        
+        return ''.join(code_lines)
     
     def _extract_code_with_comments(self, content, comment_up_to_line):
         """
