@@ -9,6 +9,14 @@
 \
 The main goal of the checkpoint system is to make it much easier to test and iterate on manim animations. It opens a preview window of the animations, allow navigating through animations, quickly jumping through animations, and hot reloading animations that have been updated in the source file. \
 \
+Overview:\
+\
+When the program runs, it initiates the first checkpoint which is just a plank screen, then runs the first animation and saves a checkpoint.\
+\
+If we\'92re at the furthest checkpoint, then we can just run the after_current_checkpoint_code. So all we have to do is \
+\
+\
+\
 Checkpoint system structure:\
 \
 Checkpoints contain: \
@@ -29,9 +37,7 @@ Running
 5. Sets current_checkpoint = 0.\
 4. Plays run_next_animation(current_checkpoint).\
 \
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
 The function jump_to_animation(checkpoint) selects all code up to and including the line number, sends it to exec() to run without animation, jumping to the checkpoint. \
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
 \
 The function run_next_animation(current_checkpoint) blocks key interaction during run, uses current_checkpoint and checks the line_number. It then runs jump_to_animation(current_checkpoint). It then takes all the code, comments out all code up to and including that line number, sends that code to exec() to execute with animation. If there\'92s code to run it runs the code. If it plays an animation it exits after playing one animation, updates current_checkpoint+=1, stores that animation in checkpoint at the new current_checkpoint. If there\'92s no animation, it exits after running all code. If there\'92s no code it prints(\'92Already at last animation\'92).\
 \

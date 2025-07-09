@@ -5,7 +5,7 @@ Scene with CE compatibility using GL backend.
 import maniml.manimgl_core
 from maniml.manimgl_core.scene.scene import Scene as GLScene
 from maniml.manimgl_core.scene.scene import ThreeDScene as GLThreeDScene
-from maniml.manimgl_core.scene.scene import SceneState, EndScene
+from maniml.manimgl_core.scene.scene import SceneState as GLSceneState, EndScene
 import warnings
 import time
 import sys
@@ -522,21 +522,11 @@ class Scene(GLScene):
             # Reset the flag to allow next animation
             self._one_animation_executed = False
             
-            # Check if there's a next checkpoint to play
-            next_index = self.current_animation_index + 1
-            if next_index < len(self.animation_checkpoints):
-                # Play the next stored animation
-                success = self.play_next_animation(self.current_animation_index)
-                if not success:
-                    print("Failed to play next animation")
-            else:
-                # No next checkpoint, run new animation from file
-                success = self.run_next_animation(self.current_animation_index)
-                if success:
-                    # run_next_animation creates a new checkpoint and updates index
-                    pass
-                else:
-                    print("No more animations to run")
+            # Always use run_next_animation to re-execute code
+            # This ensures we create fresh animations with current scene mobjects
+            success = self.run_next_animation(self.current_animation_index)
+            if not success:
+                print("No more animations to run")
         
         # InteractiveScene key handlers
         char = chr(symbol) if symbol < 256 else ''
@@ -1397,17 +1387,40 @@ class Scene(GLScene):
                     pass
             
             # Store the local variables from the calling frame
+            # DON'T copy mobjects here - we want to maintain references to the originals
+            # The scene state will handle copying for restoration
             caller_locals = {}
             for name, obj in frame.f_locals.items():
                 if not name.startswith('_') and name != 'self':
-                    caller_locals[name] = obj  # Store reference, not copy
+                    caller_locals[name] = obj
             
-            # Store the animations and kwargs for replay
+            # Store animation objects with mobject ID mapping for proper replay
+            # First, convert any _AnimationBuilder objects to actual animations
+            from maniml.manimgl_core.mobject.mobject import _AnimationBuilder
+            built_animations = []
+            for anim in animations:
+                if isinstance(anim, _AnimationBuilder):
+                    # Build the actual animation from the builder
+                    built_anim = anim.build()
+                    built_animations.append(built_anim)
+                else:
+                    built_animations.append(anim)
+            
+            # Create mobject ID map for remapping later
+            mobject_id_map = {}
+            for anim in built_animations:
+                if hasattr(anim, 'mobject'):
+                    # Store the original ID and the mobject itself
+                    mobject_id_map[id(anim.mobject)] = anim.mobject
+                if hasattr(anim, 'target_mobject') and anim.target_mobject:
+                    mobject_id_map[id(anim.target_mobject)] = anim.target_mobject
+            
             animation_info = {
                 'type': 'play',
-                'animations': animations,  # Store the actual animation objects
+                'animations': built_animations,  # Store built animation objects
                 'kwargs': kwargs,
-                'line_no': line_no
+                'line_no': line_no,
+                'mobject_id_map': mobject_id_map
             }
         
         # Always play the animation normally
@@ -1415,18 +1428,32 @@ class Scene(GLScene):
         
         # Only save checkpoints if we're NOT navigating with arrow keys
         if not is_navigating:
-            # Save checkpoint AFTER animation completes
-            self.current_animation_index += 1
-            state = self.get_state()
-            # Store everything needed to replay this animation
-            self.animation_checkpoints.append((
-                self.current_animation_index, 
-                line_no, 
-                state, 
-                caller_locals,
-                animation_info  # Store the animation info
-            ))
-            print(f"[CHECKPOINT] Created checkpoint {self.current_animation_index} at line {line_no}, total: {len(self.animation_checkpoints)}")
+            # Check if we're replaying an existing checkpoint
+            # If current_animation_index + 1 already has a checkpoint at this line, don't create a new one
+            next_index = self.current_animation_index + 1
+            should_create_checkpoint = True
+            
+            if next_index < len(self.animation_checkpoints):
+                existing_checkpoint = self.animation_checkpoints[next_index]
+                if existing_checkpoint[1] == line_no:  # Same line number
+                    # We're replaying an existing checkpoint, don't create a new one
+                    should_create_checkpoint = False
+                    self.current_animation_index = next_index
+                    print(f"[CHECKPOINT] Replayed existing checkpoint {self.current_animation_index} at line {line_no}")
+            
+            if should_create_checkpoint:
+                # Save checkpoint AFTER animation completes
+                self.current_animation_index += 1
+                state = self.get_state()
+                # Store everything needed to replay this animation
+                self.animation_checkpoints.append((
+                    self.current_animation_index, 
+                    line_no, 
+                    state, 
+                    caller_locals,
+                    animation_info  # Store the animation info
+                ))
+                print(f"[CHECKPOINT] Created checkpoint {self.current_animation_index} at line {line_no}, total: {len(self.animation_checkpoints)}")
             
             # Keep only last 50 checkpoints to avoid memory issues
             if len(self.animation_checkpoints) > 50:
@@ -1580,7 +1607,9 @@ class Scene(GLScene):
             if current_checkpoint >= 0 and current_checkpoint < len(self.animation_checkpoints):
                 checkpoint = self.animation_checkpoints[current_checkpoint]
                 if len(checkpoint) > 3:
-                    namespace.update(checkpoint[3])  # caller_locals
+                    stored_locals = checkpoint[3]
+                    for name, obj in stored_locals.items():
+                        namespace[name] = obj
             
             # Execute the code
             # We need to compile with the correct filename and starting line
@@ -1613,13 +1642,52 @@ class Scene(GLScene):
             if hasattr(self, '_one_animation_executed'):
                 self._one_animation_executed = False
     
+    def remap_animation_mobjects(self, animations, stored_id_map, prev_checkpoint=None):
+        """
+        Remap animation mobject references to current scene mobjects.
+        Uses the order of mobjects in the scene to map stored references.
+        """
+        # Create a type-based mapping
+        # Group scene mobjects by type
+        scene_mobs_by_type = {}
+        for mob in self.mobjects:
+            mob_type = type(mob).__name__
+            if mob_type not in scene_mobs_by_type:
+                scene_mobs_by_type[mob_type] = []
+            scene_mobs_by_type[mob_type].append(mob)
+        
+        # Group stored mobjects by type
+        stored_mobs_by_type = {}
+        for stored_mob in stored_id_map.values():
+            mob_type = type(stored_mob).__name__
+            if mob_type not in stored_mobs_by_type:
+                stored_mobs_by_type[mob_type] = []
+            stored_mobs_by_type[mob_type].append(stored_mob)
+        
+        # Create mapping based on order within each type
+        stored_to_scene = {}
+        for mob_type in stored_mobs_by_type:
+            if mob_type in scene_mobs_by_type:
+                stored_list = stored_mobs_by_type[mob_type]
+                scene_list = scene_mobs_by_type[mob_type]
+                # Map by index - first stored Circle maps to first scene Circle, etc
+                for i, stored_mob in enumerate(stored_list):
+                    if i < len(scene_list):
+                        stored_to_scene[stored_mob] = scene_list[i]
+        
+        # Remap animations
+        for anim in animations:
+            if hasattr(anim, 'mobject') and anim.mobject in stored_to_scene:
+                anim.mobject = stored_to_scene[anim.mobject]
+                
+            if hasattr(anim, 'target_mobject') and anim.target_mobject and anim.target_mobject in stored_to_scene:
+                anim.target_mobject = stored_to_scene[anim.target_mobject]
+    
     def play_next_animation(self, current_checkpoint):
         """
         Play the stored animation at the next checkpoint.
-        Blocks key interaction during playback.
-        Updates current_checkpoint after playing.
+        Uses stored animation objects with remapped mobject references.
         """
-        # Block key interaction
         self._processing_key = True
         
         try:
@@ -1635,8 +1703,19 @@ class Scene(GLScene):
             if next_index > 0:
                 prev_checkpoint = self.animation_checkpoints[next_index - 1]
                 self.restore_state(prev_checkpoint[2])
+            else:
+                # First animation - clear the scene
+                self.clear()
             
             print(f"Playing animation {next_index + 1}/{len(self.animation_checkpoints)}")
+            
+            # Debug: print what's in this checkpoint
+            if len(next_checkpoint) > 4:
+                anim_info = next_checkpoint[4]
+                if 'animations' in anim_info:
+                    print(f"  Contains {len(anim_info['animations'])} animations:")
+                    for i, anim in enumerate(anim_info['animations']):
+                        print(f"    {i}: {type(anim).__name__} on {type(anim.mobject).__name__ if hasattr(anim, 'mobject') else 'N/A'}")
             
             # Check if checkpoint has animation info
             if len(next_checkpoint) > 4 and isinstance(next_checkpoint[4], dict):
@@ -1645,23 +1724,44 @@ class Scene(GLScene):
                 # Set navigating flag to prevent new checkpoints
                 self._navigating_animations = True
                 try:
-                    if animation_info['type'] == 'play':
-                        animations = animation_info['animations']
-                        kwargs = animation_info['kwargs']
+                    if animation_info['type'] == 'play' and 'animations' in animation_info:
+                        stored_animations = animation_info['animations']
+                        kwargs = animation_info.get('kwargs', {})
+                        
+                        # Create fresh copies of the animations to avoid state contamination
+                        animations = []
+                        for anim in stored_animations:
+                            # Use the animation's copy method if available
+                            if hasattr(anim, 'copy'):
+                                anim_copy = anim.copy()
+                            else:
+                                # Fallback to deepcopy
+                                import copy
+                                anim_copy = copy.deepcopy(anim)
+                            animations.append(anim_copy)
+                        
+                        # Remap animation mobject references to current scene mobjects
+                        if 'mobject_id_map' in animation_info:
+                            self.remap_animation_mobjects(animations, animation_info['mobject_id_map'])
+                        
+                        # Play the remapped animations
                         self.play(*animations, **kwargs)
                         
                         # Update index after successful playback
                         self.current_animation_index = next_index
                         return True
                     else:
-                        print(f"Unknown animation type: {animation_info['type']}")
-                        return False
+                        # Fallback to run_next_animation for old checkpoints
+                        print("Using fallback: re-executing code")
+                        self._navigating_animations = False
+                        return self.run_next_animation(current_checkpoint)
                     
                 finally:
                     self._navigating_animations = False
             else:
-                print("No animation info in checkpoint")
-                return False
+                # No animation info - use run_next_animation
+                print("No animation info - re-executing code")
+                return self.run_next_animation(current_checkpoint)
                 
         except Exception as e:
             print(f"Error in play_next_animation: {e}")
@@ -2147,7 +2247,7 @@ class Scene(GLScene):
     # Override get_state to ignore interactive elements
     
     def get_state(self):
-        return SceneState(self, ignore=[
+        return GLSceneState(self, ignore=[
             self.selection_highlight,
             self.selection_rectangle,
             self.crosshair,
