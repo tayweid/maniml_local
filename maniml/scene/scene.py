@@ -136,7 +136,8 @@ class Scene(GLScene):
         self.animations = []  # Track animations for CE compatibility
         
         # Checkpoint management
-        self.checkpoints = []  # List of (index, line_number, state, locals, animation_info) tuples
+        # Structure: (index, line_number, start_state, end_state, locals, animation_info)
+        self.checkpoints = []
         self.current_checkpoint = -1
         self.tight = True  # True if we can execute directly, False if we need to reexecute
         
@@ -427,12 +428,14 @@ class Scene(GLScene):
     def start(self):
         """Initialize checkpoint system with blank screen as checkpoint 0."""
         # Create initial blank checkpoint
-        self.checkpoints = [(0, 0, self.get_state(), {}, None)]
+        # For checkpoint 0, start and end state are the same (blank scene)
+        blank_state = self.get_state()
+        self.checkpoints = [(0, 0, blank_state, blank_state, {}, None)]
         self.current_checkpoint = 0
         self.tight = True
         
         # Also update legacy system for compatibility
-        self.animation_checkpoints = [(0, 0, self.get_state(), {}, None)]
+        self.animation_checkpoints = [(0, 0, blank_state, {}, None)]
         self.current_animation_index = 0
     
     def run_next_code(self):
@@ -560,11 +563,79 @@ class Scene(GLScene):
         
         # Add stored locals from current checkpoint
         if 0 <= self.current_checkpoint < len(self.checkpoints):
-            stored_locals = self.checkpoints[self.current_checkpoint][3]
+            stored_locals = self.checkpoints[self.current_checkpoint][4]  # locals are now at index 4
             if stored_locals:
                 namespace.update(stored_locals)
         
         return namespace
+    
+    def get_mobject_name(self, mobject, locals_dict):
+        """Find the variable name for a mobject in the locals dict."""
+        for name, obj in locals_dict.items():
+            if obj is mobject and not name.startswith('_'):
+                return name
+        # If not found, generate a unique identifier
+        return f"_mob_{id(mobject)}"
+    
+    def get_animation_class(self, class_name):
+        """Get animation class from its name."""
+        # Import all animation classes using the same imports as __init__.py
+        from maniml import (
+            Create, Write, DrawBorderThenFill, ShowCreation, Uncreate,
+            FadeIn, FadeOut, FadeInFrom, FadeOutAndShift,
+            Transform, ReplacementTransform, TransformFromCopy, MoveToTarget,
+            GrowFromPoint, GrowFromCenter, GrowFromEdge,
+            Indicate, FocusOn, Flash, CircleIndicate,
+            Rotate, Rotating
+        )
+        
+        # Build animation class map
+        animation_classes = {
+            'Create': Create,
+            'Write': Write,
+            'DrawBorderThenFill': DrawBorderThenFill,
+            'ShowCreation': ShowCreation,
+            'Uncreate': Uncreate,
+            'FadeIn': FadeIn,
+            'FadeOut': FadeOut,
+            'Transform': Transform,
+            'ReplacementTransform': ReplacementTransform,
+            'TransformFromCopy': TransformFromCopy,
+            'Rotate': Rotate,
+            'GrowFromPoint': GrowFromPoint,
+            'GrowFromCenter': GrowFromCenter,
+            'GrowFromEdge': GrowFromEdge,
+            'Indicate': Indicate,
+            'FocusOn': FocusOn,
+            'Flash': Flash,
+            'CircleIndicate': CircleIndicate,
+            'Rotating': Rotating,
+            'MoveToTarget': MoveToTarget,
+            'FadeInFrom': FadeInFrom,
+            'FadeOutAndShift': FadeOutAndShift,
+        }
+        
+        if class_name in animation_classes:
+            return animation_classes[class_name]
+        
+        # For internal animation classes (used by .animate syntax)
+        if class_name == '_AnimateFromAlpha':
+            from maniml.manimgl_core.mobject.mobject import _AnimateFromAlpha
+            return _AnimateFromAlpha
+        
+        if class_name == '_MethodAnimation':
+            from maniml.manimgl_core.mobject.mobject import _MethodAnimation
+            return _MethodAnimation
+        
+        # Try to get from frame's namespace (where user code runs)
+        import inspect
+        frame = inspect.currentframe()
+        while frame:
+            if class_name in frame.f_globals:
+                return frame.f_globals[class_name]
+            frame = frame.f_back
+        
+        raise ValueError(f"Animation class '{class_name}' not found")
     
     def play_forward(self):
         """Play animation at next checkpoint using stored animation info."""
@@ -576,19 +647,46 @@ class Scene(GLScene):
             
         next_checkpoint = self.checkpoints[next_index]
         
-        # Restore to state BEFORE this animation
-        if self.current_checkpoint >= 0:
-            self.restore_state(self.checkpoints[self.current_checkpoint][2])
+        # Restore to START state of this animation
+        start_state = next_checkpoint[2]  # start_state is at index 2
+        self.restore_state(start_state)
         
         # Get stored animation info
-        anim_info = next_checkpoint[4]
-        if anim_info and anim_info['type'] == 'play':
+        anim_info = next_checkpoint[5]  # animation_info is now at index 5
+        stored_locals = next_checkpoint[4]  # locals are at index 4
+        
+        if anim_info and anim_info['type'] == 'play' and 'animation_specs' in anim_info:
             # Set navigating flag to prevent new checkpoints
             self._navigating_animations = True
             try:
-                animations = self.remap_stored_animations(anim_info)
-                self.play(*animations, **anim_info.get('kwargs', {}))
+                # Recreate animations from specs
+                animations = []
+                for spec in anim_info['animation_specs']:
+                    # Get the animation class
+                    anim_class = self.get_animation_class(spec['class_name'])
+                    
+                    # Get the mobject from stored locals
+                    mobject_name = spec.get('mobject_name')
+                    if mobject_name and mobject_name in stored_locals:
+                        mobject = stored_locals[mobject_name]
+                        
+                        # Handle animations with target mobjects (like Transform)
+                        target_name = spec.get('target_mobject_name')
+                        if target_name and target_name in stored_locals:
+                            target = stored_locals[target_name]
+                            anim = anim_class(mobject, target, **spec.get('kwargs', {}))
+                        else:
+                            anim = anim_class(mobject, **spec.get('kwargs', {}))
+                        
+                        animations.append(anim)
+                    else:
+                        print(f"Warning: Could not find mobject '{mobject_name}' for {spec['class_name']}")
                 
+                # Play the recreated animations
+                play_kwargs = anim_info.get('play_kwargs', {})
+                self.play(*animations, **play_kwargs)
+                
+                # After playing, we should naturally be at the end state
                 # Update position
                 self.current_checkpoint = next_index
                 self.current_animation_index = next_index  # Legacy support
@@ -608,7 +706,9 @@ class Scene(GLScene):
             return
             
         checkpoint = self.checkpoints[checkpoint_index]
-        self.restore_state(checkpoint[2])
+        # Restore to END state of this checkpoint
+        end_state = checkpoint[3]  # end_state is at index 3
+        self.restore_state(end_state)
         self.current_checkpoint = checkpoint_index
         self.current_animation_index = checkpoint_index  # Legacy support
         self.tight = False
@@ -624,30 +724,6 @@ class Scene(GLScene):
         else:
             print("Already at first checkpoint")
     
-    def remap_stored_animations(self, anim_info):
-        """Remap stored animations to current scene mobjects."""
-        if 'animations' not in anim_info:
-            return []
-            
-        stored_animations = anim_info['animations']
-        mobject_id_map = anim_info.get('mobject_id_map', {})
-        
-        # Use existing remapping logic
-        animations = []
-        for anim in stored_animations:
-            # Create fresh copy
-            if hasattr(anim, 'copy'):
-                anim_copy = anim.copy()
-            else:
-                import copy
-                anim_copy = copy.deepcopy(anim)
-            animations.append(anim_copy)
-        
-        # Remap mobjects
-        if mobject_id_map:
-            self.remap_animation_mobjects(animations, mobject_id_map)
-        
-        return animations
     
     def update_frame(self, dt=0, force_draw=False):
         """Override to check for file changes."""
@@ -1142,7 +1218,7 @@ class Scene(GLScene):
         # Find last unedited checkpoint
         last_safe_checkpoint = -1
         for i in range(len(self.checkpoints) - 1, -1, -1):
-            if self.checkpoints[i][1] < smallest_edit:
+            if self.checkpoints[i][1] < smallest_edit:  # line_number is still at index 1
                 last_safe_checkpoint = i
                 break
         
@@ -1703,34 +1779,55 @@ class Scene(GLScene):
                 if not name.startswith('_') and name != 'self':
                     caller_locals[name] = obj
             
-            # Store animation objects with mobject ID mapping for proper replay
+            # Store animation creation specs instead of objects
             # First, convert any _AnimationBuilder objects to actual animations
             from maniml.manimgl_core.mobject.mobject import _AnimationBuilder
-            built_animations = []
+            animation_specs = []
+            built_animations = []  # We still need to play these
+            
             for anim in animations:
                 if isinstance(anim, _AnimationBuilder):
                     # Build the actual animation from the builder
-                    built_anim = anim.build()
-                    built_animations.append(built_anim)
-                else:
-                    built_animations.append(anim)
-            
-            # Create mobject ID map for remapping later
-            mobject_id_map = {}
-            for anim in built_animations:
-                if hasattr(anim, 'mobject'):
-                    # Store the original ID and the mobject itself
-                    mobject_id_map[id(anim.mobject)] = anim.mobject
+                    anim = anim.build()
+                
+                built_animations.append(anim)
+                
+                # Create spec for recreating this animation
+                spec = {
+                    'class_name': type(anim).__name__,
+                    'mobject_name': self.get_mobject_name(anim.mobject, caller_locals) if hasattr(anim, 'mobject') else None,
+                }
+                
+                # Store any additional mobjects (like target_mobject for Transform)
                 if hasattr(anim, 'target_mobject') and anim.target_mobject:
-                    mobject_id_map[id(anim.target_mobject)] = anim.target_mobject
+                    spec['target_mobject_name'] = self.get_mobject_name(anim.target_mobject, caller_locals)
+                
+                # Try to get animation kwargs
+                if hasattr(anim, 'kwargs'):
+                    spec['kwargs'] = anim.kwargs
+                else:
+                    # Extract basic animation parameters
+                    spec['kwargs'] = {}
+                    if hasattr(anim, 'run_time'):
+                        spec['kwargs']['run_time'] = anim.run_time
+                    if hasattr(anim, 'rate_func'):
+                        spec['kwargs']['rate_func'] = anim.rate_func
+                
+                animation_specs.append(spec)
             
             animation_info = {
                 'type': 'play',
-                'animations': built_animations,  # Store built animation objects
-                'kwargs': kwargs,
+                'animation_specs': animation_specs,  # Store creation specs
+                'play_kwargs': kwargs,  # kwargs passed to play()
                 'line_no': line_no,
-                'mobject_id_map': mobject_id_map
             }
+            
+            # Replace animations with built ones for actual playback
+            animations = built_animations
+        
+        # Capture start state BEFORE playing animation
+        if not is_navigating:
+            start_state = self.get_state()
         
         # Always play the animation normally
         result = super().play(*animations, **kwargs)
@@ -1755,13 +1852,14 @@ class Scene(GLScene):
                 # Save checkpoint AFTER animation completes
                 self.current_animation_index += 1
                 self.current_checkpoint += 1
-                state = self.get_state()
+                end_state = self.get_state()
                 
-                # Store in new system
+                # Store in new system with both start and end states
                 self.checkpoints.append((
                     self.current_checkpoint,
                     line_no,
-                    state,
+                    start_state,    # State before animation
+                    end_state,      # State after animation
                     caller_locals,
                     animation_info
                 ))
@@ -1770,7 +1868,7 @@ class Scene(GLScene):
                 self.animation_checkpoints.append((
                     self.current_animation_index, 
                     line_no, 
-                    state, 
+                    end_state,      # Legacy system only stores end state
                     caller_locals,
                     animation_info
                 ))
