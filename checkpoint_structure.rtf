@@ -15,8 +15,7 @@ Checkpoints contain: \
 1. index (animation number)\
 2. line_number (the last line where play() was called, so if it\'92s multiple lines, it\'92s the last line)\
 3. state: SceneState with mobject copies\
-4. caller_locals: Dictionary of local variables (references not yet copies)\
-5. animation_info: Details about the animation for replay\
+4. animation_info: Details about the animation for replay\
 \
 Only play() creates checkpoints. The wait() method does not create new checkpoints.\
 \
@@ -30,28 +29,25 @@ Running
 5. Sets current_checkpoint = 0.\
 4. Plays run_next_animation(current_checkpoint).\
 \
-The function run_next_animation(current_checkpoint) blocks key interaction during run, uses current_checkpoint, checks the line_number, comments out all code up to and including that line number, sends that code to exec() to execute. If there\'92s code to run it runs the code. If it plays an animation it exits after playing one animation, updates current_checkpoint+=1, stores that animation in checkpoint at the new current_checkpoint. If there\'92s no animation, it exits after running all code. If there\'92s no code it prints(\'92Already at last animation\'92).\
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+The function jump_to_animation(checkpoint) selects all code up to and including the line number, sends it to exec() to run without animation, jumping to the checkpoint. \
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+\
+The function run_next_animation(current_checkpoint) blocks key interaction during run, uses current_checkpoint and checks the line_number. It then runs jump_to_animation(current_checkpoint). It then takes all the code, comments out all code up to and including that line number, sends that code to exec() to execute with animation. If there\'92s code to run it runs the code. If it plays an animation it exits after playing one animation, updates current_checkpoint+=1, stores that animation in checkpoint at the new current_checkpoint. If there\'92s no animation, it exits after running all code. If there\'92s no code it prints(\'92Already at last animation\'92).\
 \
 The function play_next_animation(current_checkpoint) blocks key interaction during run, uses current_checkpoint, plays the stored animation in animation_info, and updates current_checkpoint+=1.\
 \
-The right arrow runs right_arrow(current_checkpoint), which:\
-1. If there\'92s a next checkpoint, it runs play_next_animation(current_checkpoint).\
-2. If there\'92s no next checkpoint it runs run_next_animation(current_checkpoint). \
+The right arrow runs right_arrow(current_checkpoint), which runs run_next_animation(current_checkpoint). \
 \
-The down arrow runs down_arrow(current_checkpoint), which:\
-1. If there\'92s a next checkpoint, it runs jump_to_next_animation(current_checkpoint).\
-2. If there\'92s no next checkpoint it runs run_next_animation(current_checkpoint). \
+The down arrow runs down_arrow(current_checkpoint), which runs jump_to_next_animation(current_checkpoint).\
 \
-The function jump_to_next_animation(current_checkpoint) sets current_checkpoint += 1 and jumps to the new current_checkpoint. \
+The function jump_to_next_animation(current_checkpoint) sets current_checkpoint += 1, then runs jump_to_animation(current_checkpoint) on the new checkpoint. \
 \
 The left arrow and up arrow run jump_to_previous_animation(current_checkpoint).\
 \
-The function jump_to_previous_animation(current_checkpoint) sets current_checkpoint -= 1 and jumps to the new current_checkpoint. \
+The function jump_to_previous_animation(current_checkpoint) sets current_checkpoint -= 1, then runs jump_to_animation(current_checkpoint) on the new checkpoint. \
 \
-When the file watcher detects an edit to test_simple.py, it finds the smallest line that\'92s been edited, smallest_line_edit, and the largest line that\'92s been edited, largest_line_edit, and runs edit_checkpoint(smallest_line_edit, largest_line_edit).\
+When the file watcher detects an edit to test_simple.py, it finds the smallest line that\'92s been edited, smallest_line_edit, and the largest line that\'92s been edited, largest_line_edit, and runs edit_checkpoint(current_checkpoint, smallest_line_edit, largest_line_edit).\
 \
-The function edit_checkpoint(smallest_line_edit, largest_line_edit) starts with the last checkpoint, and checks whether the checkpoint\'92s line_number is greater than smallest_line_edit, and continues backward until a checkpoint\'92s line_number is less than smallest_line_edit. Then current_checkpoint is set to this checkpoint\'92s index, all checkpoints with indexes greater than this new current_checkpoint are deleted entirely, and then run_next_animation(current_checkpoint) is run until the line_number of the current_checkpoint is greater than largest_line_edit. \
-\
-\
-\
+The function edit_checkpoint(smallest_line_edit, largest_line_edit) starts with the last checkpoint, and checks whether the checkpoint\'92s line_number is greater than smallest_line_edit, and continues backward until a checkpoint\'92s line_number is less than smallest_line_edit. Then current_checkpoint is set to this checkpoint\'92s index, jump_to_animation(current_checkpoint) is run on this new checkpoint, then all checkpoints with indexes greater than this new current_checkpoint are deleted entirely, and then run_next_animation(current_checkpoint) is run until the line_number of the current_checkpoint is greater than largest_line_edit. \
 }
