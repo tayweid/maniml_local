@@ -16,6 +16,10 @@ import difflib
 import itertools as it
 import numpy as np
 import copy
+from contextlib import contextmanager
+
+# Import IPython for persistent namespace execution
+from IPython.terminal.embed import InteractiveShellEmbed
 
 # Import event system - use ManimGL's since that's what the mobjects use
 from maniml.manimgl_core.event_handler import EVENT_DISPATCHER
@@ -98,6 +102,15 @@ class Scene(GLScene):
     
     Provides CE's API while using GL's fast rendering.
     Includes ManimGL's mouse interaction features.
+    
+    Checkpoint Navigation Implementation:
+    - Uses IPython's InteractiveShellEmbed for persistent namespace execution
+    - Stores complete scene state at each checkpoint (before and after animation)
+    - Navigation works by:
+      - Backward: Restore scene state from checkpoint
+      - Forward: If checkpoint exists, restore it; otherwise execute next code
+    - IPython's run_cell() maintains proper variable scope and object references
+    - temp_skip() context manager controls animation execution during re-runs
     """
     
     # Interaction settings
@@ -147,6 +160,10 @@ class Scene(GLScene):
         self.animation_checkpoints = []  # For backward compatibility
         self.current_animation_index = -1
         
+        # Initialize persistent namespace for code execution
+        # Will be fully initialized after super().__init__
+        self.code_namespace = None
+        
         # Auto-reload setup
         self.file_watcher = None
         self.auto_reload_enabled = kwargs.pop('auto_reload', True)  # Enable by default
@@ -157,9 +174,9 @@ class Scene(GLScene):
         # Track mobject variable names for animation replay
         self._mobject_to_name = {}  # Maps mobject id to variable name
         
-        # Start in single-animation mode
-        self._stop_after_one_animation = True
-        self._one_animation_executed = False
+        # Animation control for checkpoint navigation
+        self._animations_to_play = 1  # How many animations to play
+        self._animations_played = 0   # How many have been played so far
         
         # InteractiveScene attributes
         self.selection = Group()
@@ -184,12 +201,44 @@ class Scene(GLScene):
         
         super().__init__(**kwargs)
         
+        # Initialize persistent namespace after super().__init__ so self is fully initialized
+        self.code_namespace = {'self': self}
+        exec("from maniml import *", self.code_namespace)
+        
+        # Initialize IPython shell for code execution
+        self.shell = None
+        self._initialize_ipython_shell()
+        
         # Enable auto-reload if requested
         if self.auto_reload_enabled:
             self.setup_auto_reload()
             
         # Setup interactive elements
         self.setup_interactive_elements()
+    
+    def _initialize_ipython_shell(self):
+        """Initialize IPython shell for persistent namespace execution."""
+        try:
+            # Create a dummy module to hold the namespace
+            import types
+            module = types.ModuleType('__main__')
+            module.__dict__.update(self.code_namespace)
+            
+            # Create the shell without displaying banner
+            self.shell = InteractiveShellEmbed(
+                user_module=module,
+                display_banner=False,
+                # Don't use IPython's exception handling - we'll handle our own
+                xmode='Plain'
+            )
+            
+            # Disable IPython's GUI event loop since we manage our own
+            self.shell.enable_gui = lambda gui=None: None
+            
+        except Exception as e:
+            print(f"Warning: Failed to initialize IPython shell: {e}")
+            print("Falling back to exec-based execution")
+            self.shell = None
     
     def setup_interactive_elements(self):
         """Initialize interactive elements like selection highlight, crosshair, etc."""
@@ -228,6 +277,16 @@ class Scene(GLScene):
         """CE-style remove method that returns self for chaining."""
         super().remove(*mobjects)
         return self
+    
+    @contextmanager
+    def temp_skip(self):
+        """Temporarily skip animations in this context."""
+        prev_skip = self.skip_animations
+        self.skip_animations = True
+        try:
+            yield
+        finally:
+            self.skip_animations = prev_skip
     
     def play(self, *animations, **kwargs):
         """
@@ -440,47 +499,40 @@ class Scene(GLScene):
         self.current_animation_index = 0
     
     def run_next_code(self):
-        """Execute code after current checkpoint to create next animation."""
+        """Execute code to play the next animation."""
         if not hasattr(self, '_scene_filepath') or not self._scene_filepath:
             return False
-            
-        print(f"\n[DEBUG RUN_NEXT_CODE] Starting run_next_code()")
-        print(f"[DEBUG RUN_NEXT_CODE] current_checkpoint = {self.current_checkpoint}")
         
-        # Get current checkpoint line number
-        current_line = 0
-        if self.current_checkpoint >= 0 and self.current_checkpoint < len(self.checkpoints):
-            current_line = self.checkpoints[self.current_checkpoint][1]
+        # After reexecute(), the scene is at the current checkpoint state
+        # We just need to play ONE more animation
+        # Set counters to skip animations we've already seen
+        self._animations_to_play = self.current_checkpoint + 2  # Skip first N, play the (N+1)th
+        self._animations_played = self.current_checkpoint + 1  # Start counting from where we are
         
-        print(f"[DEBUG RUN_NEXT_CODE] Current line to comment up to: {current_line}")
+        # Get the full construct method code
+        code = self._extract_construct_code()
         
-        # Extract code with comments up to current line
-        code = self.comment_out_to_line(current_line)
-        print(f"[DEBUG RUN_NEXT_CODE] Extracted code ({len(code)} chars):")
-        print("=" * 50)
-        print(code)
-        print("=" * 50)
+        # Execute the code - it will skip to the right place and play one animation
+        if self.shell is not None:
+            result = self.run_exec_in_namespace(code, self.shell.user_module.__dict__, animations=True)
+        else:
+            result = self.run_exec_in_namespace(code, self.code_namespace, animations=True)
         
-        # Get namespace with stored locals
-        namespace = self.get_namespace()
-        print(f"[DEBUG RUN_NEXT_CODE] Namespace has {len(namespace)} items")
+        # Check if we actually played a new animation
+        played_new = self._animations_played > self.current_checkpoint + 1
         
-        # Execute code with animations enabled
-        print(f"[DEBUG RUN_NEXT_CODE] Running code with animations...")
-        return self.run_exec(code, namespace, animations=True)
+        # Reset animation counter
+        self._animations_played = 0
+        
+        return played_new
     
-    def run_exec(self, code, namespace, animations=True):
+    def run_exec(self, code, animations=True):
         """Execute code with optional animation suppression."""
-        print(f"\n[DEBUG RUN_EXEC] animations={animations}")
-        print(f"[DEBUG RUN_EXEC] Mobjects before exec: {len(self.mobjects)}")
-        
-        # Set flags for animation control
-        self._stop_after_one_animation = True
-        self._one_animation_executed = False
-        
-        if not animations:
-            self._skip_animations = True
-        
+        # Use persistent namespace
+        return self.run_exec_in_namespace(code, self.code_namespace, animations)
+    
+    def run_exec_in_namespace(self, code, namespace, animations=True):
+        """Execute code in a specific namespace with optional animation suppression."""
         try:
             # Check if we have executable code
             has_executable = False
@@ -491,119 +543,92 @@ class Scene(GLScene):
                     break
             
             if not has_executable:
-                print(f"[DEBUG RUN_EXEC] No executable code found")
                 return False
             
-            # Compile and execute
-            compiled = compile(code, self._scene_filepath, 'exec')
-            exec(compiled, namespace)
+            # Execute with or without animations
+            if not animations:
+                # Use temp_skip context to skip animations
+                with self.temp_skip():
+                    self._execute_code(code, namespace)
+            else:
+                self._execute_code(code, namespace)
             
-            print(f"[DEBUG RUN_EXEC] After exec, mobjects = {len(self.mobjects)}")
-            for i, mob in enumerate(self.mobjects):
-                print(f"  [{i}] {type(mob).__name__}")
-            
-            # Return whether we executed an animation
-            return self._one_animation_executed
+            # Return whether we played any animations
+            return self._animations_played > 0
             
         except Exception as e:
             print(f"Error in run_exec: {e}")
             import traceback
             traceback.print_exc()
             return False
-        finally:
-            if not animations:
-                self._skip_animations = False
-            # Don't delete _stop_after_one_animation - we want this behavior
-            if hasattr(self, '_one_animation_executed'):
-                self._one_animation_executed = False
+    
+    def _execute_code(self, code, namespace):
+        """Helper to execute code using IPython or exec."""
+        # Use IPython shell if available, otherwise fall back to exec
+        if self.shell is not None:
+            # Update the shell's namespace with the provided namespace
+            self.shell.user_module.__dict__.update(namespace)
+            
+            # Execute using IPython's run_cell
+            result = self.shell.run_cell(code, silent=True, store_history=False)
+            
+            # Check for errors
+            if result.error_in_exec:
+                print(f"Error in run_cell: {result.error_in_exec}")
+                raise result.error_in_exec
+        else:
+            # Fallback to exec if IPython is not available
+            compiled = compile(code, self._scene_filepath, 'exec')
+            exec(compiled, namespace)
     
     def reexecute(self):
-        """Re-run all code up to current checkpoint without animations."""
+        """Re-run all code up to current checkpoint by playing N animations."""
         if not hasattr(self, '_scene_filepath') or not self._scene_filepath:
-            return
-            
-        print(f"\n[DEBUG REEXECUTE] Starting reexecute()")
-        print(f"[DEBUG REEXECUTE] current_checkpoint = {self.current_checkpoint}")
-        print(f"[DEBUG REEXECUTE] Number of checkpoints = {len(self.checkpoints)}")
+            return None
         
         # Clear the scene to ensure clean slate
         self.clear()
-        print(f"[DEBUG REEXECUTE] Scene cleared, mobjects = {len(self.mobjects)}")
         
-        # Get line number to execute up to
-        # We want to execute up to the current checkpoint
-        checkpoint_line = self.checkpoints[self.current_checkpoint][1]
-        print(f"[DEBUG REEXECUTE] Using next checkpoint line: {checkpoint_line}")
-        
-        # Extract code up to that line
-        code = self.code_upto_line(checkpoint_line)
-        print(f"[DEBUG REEXECUTE] Extracted code ({len(code)} chars):")
-        print("=" * 50)
-        print(code)
-        print("=" * 50)
-        
-        # Count actual lines in the extracted code
-        code_lines = code.split('\n')
-        non_empty_lines = [line for line in code_lines if line.strip()]
-        if non_empty_lines:
-            print(f"[DEBUG REEXECUTE] Last line to execute: '{non_empty_lines[-1].strip()}'")
+        # Clear the namespace completely
+        if self.shell is not None:
+            # Clear IPython namespace except for 'self'
+            self.shell.user_module.__dict__.clear()
+            self.shell.user_module.__dict__['self'] = self
+            # Re-import maniml
+            self.shell.run_cell("from maniml import *", silent=True, store_history=False)
         else:
-            print(f"[DEBUG REEXECUTE] No lines to execute")
+            # Clear and recreate namespace for exec
+            self.code_namespace = {'self': self}
+            exec("from maniml import *", self.code_namespace)
         
-        # Get fresh namespace (no stored locals for re-execution)
-        namespace = {'self': self}
-        exec("from maniml import *", namespace)
+        # If at checkpoint 0 or before, don't execute any animations
+        if self.current_checkpoint <= 0:
+            self.tight = True
+            return
         
-        # Run without animations
-        print(f"[DEBUG REEXECUTE] Running code without animations...")
+        # Set up to play animations up to current checkpoint
+        self._animations_to_play = self.current_checkpoint
+        self._animations_played = 0
         
-        # Add a simple trace to see what lines execute
-        self._reexecute_lines = []
-        def trace_lines(frame, event, arg):
-            if event == 'line' and frame.f_code.co_filename == self._scene_filepath:
-                line_no = frame.f_lineno
-                if line_no not in self._reexecute_lines:
-                    self._reexecute_lines.append(line_no)
-            return trace_lines
+        # Get the full construct method code
+        code = self._extract_construct_code()
         
-        import sys
-        old_trace = sys.gettrace()
-        sys.settrace(trace_lines)
-        try:
-            self.run_exec(code, namespace, animations=False)
-        finally:
-            sys.settrace(old_trace)
-            if self._reexecute_lines:
-                print(f"[DEBUG REEXECUTE] Lines executed: {sorted(self._reexecute_lines)}")
-                print(f"[DEBUG REEXECUTE] Last line executed: {max(self._reexecute_lines)}")
+        # Execute the code - animation counting will handle skipping
+        if self.shell is not None:
+            self.run_exec_in_namespace(code, self.shell.user_module.__dict__, animations=True)
+        else:
+            self.run_exec_in_namespace(code, self.code_namespace, animations=True)
         
-        print(f"[DEBUG REEXECUTE] After reexecute, mobjects = {len(self.mobjects)}")
-        for i, mob in enumerate(self.mobjects):
-            print(f"  [{i}] {type(mob).__name__}")
+        # Reset animation counter for next operation
+        self._animations_played = 0
         
         # Mark as tight since we're caught up
         self.tight = True
     
-    def comment_out_to_line(self, line):
-        """Extract construct body with lines up to 'line' commented out."""
-        if not hasattr(self, '_scene_filepath'):
-            return ""
-            
-        # Use updated content if available, otherwise current file
-        if hasattr(self, '_updated_content') and self._updated_content:
-            content = self._updated_content
-        else:
-            try:
-                with open(self._scene_filepath, 'r') as f:
-                    content = f.readlines()
-            except:
-                return ""
-        
-        # Use existing implementation
-        return self._extract_code_with_comments(content, line)
     
-    def code_upto_line(self, line):
-        """Extract construct body code up to specified line."""
+    
+    def _extract_construct_code(self):
+        """Extract just the construct method body."""
         if not hasattr(self, '_scene_filepath'):
             return ""
             
@@ -617,8 +642,149 @@ class Scene(GLScene):
             except:
                 return ""
         
-        # Use existing implementation
-        return self._extract_code_up_to_line(content, line)
+        in_construct = False
+        code_lines = []
+        base_indent = None
+        
+        for line in content:
+            if 'def construct(self):' in line:
+                in_construct = True
+                base_indent = len(line) - len(line.lstrip())
+                continue
+            
+            if in_construct:
+                # Check if we've exited construct
+                if line.strip() and not line[base_indent:].startswith(' '):
+                    break
+                
+                # Include all lines except interactive_embed
+                if 'interactive_embed' not in line:
+                    # Remove the base indentation
+                    if len(line) > base_indent + 4:
+                        dedented = line[base_indent + 4:]  # +4 for method body indent
+                    else:
+                        dedented = line[base_indent:] if len(line) > base_indent else line
+                    
+                    code_lines.append(dedented)
+        
+        return ''.join(code_lines)
+    
+    
+    def jump_to_n(self, n):
+        """Jump to state after n animations without playing them."""
+        if n <= 0:
+            self.clear()
+            self.current_checkpoint = 0
+            return
+            
+        # Only clear the scene visually
+        self.clear()
+        
+        # Reset namespace but preserve essential imports
+        if self.shell is not None:
+            # Save essential references
+            saved_refs = {}
+            for key in ['maniml', 'manim', 'Circle', 'Square', 'Create', 'BLUE', 'RED', 'UP', 'DOWN', 'RIGHT', 'LEFT']:
+                if key in self.shell.user_module.__dict__:
+                    saved_refs[key] = self.shell.user_module.__dict__[key]
+            
+            # Clear user-defined variables only
+            keys_to_remove = []
+            for key in self.shell.user_module.__dict__:
+                if not key.startswith('_') and key not in saved_refs and key != 'self':
+                    keys_to_remove.append(key)
+            
+            for key in keys_to_remove:
+                del self.shell.user_module.__dict__[key]
+            
+            # Ensure self is available
+            self.shell.user_module.__dict__['self'] = self
+        
+        # Set animation counter to play n animations
+        self._animations_to_play = n
+        self._animations_played = 0
+        
+        # Extract construct code
+        code = self._extract_construct_code()
+        
+        if not code.strip():
+            print("No code to execute")
+            return
+        
+        # Execute with skip_animations = True
+        original_skip = self.skip_animations
+        self.skip_animations = True
+        try:
+            result = self.shell.run_cell(code, silent=True, store_history=False)
+            if result.error_in_exec:
+                print(f"Error executing code: {result.error_in_exec}")
+                return
+        except Exception as e:
+            print(f"Error in jump_to_n: {e}")
+            import traceback
+            traceback.print_exc()
+            return
+        finally:
+            self.skip_animations = original_skip
+        
+        # Update checkpoint
+        self.current_checkpoint = n - 1
+        
+        # Reset counter
+        self._animations_played = 0
+    
+    def play_n(self, n):
+        """Play only the nth animation (1-indexed)."""
+        if n <= 0:
+            return False
+            
+        # Only clear the scene visually
+        self.clear()
+        
+        # Don't clear the namespace - just ensure self is available
+        if self.shell is not None:
+            self.shell.user_module.__dict__['self'] = self
+        
+        # Set animation counter
+        self._animations_to_play = n
+        self._animations_played = 0
+        self._target_animation = n  # New flag to know when to turn off skipping
+        
+        # Extract construct code
+        code = self._extract_construct_code()
+        
+        if not code.strip():
+            print("No code to execute")
+            return False
+        
+        # Execute - we'll handle skip_animations dynamically in play()
+        try:
+            result = self.shell.run_cell(code, silent=True, store_history=False)
+            if result.error_in_exec:
+                print(f"Error executing code: {result.error_in_exec}")
+                return False
+        except Exception as e:
+            print(f"Error in play_n: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        
+        # Check if we played the animation
+        played = self._animations_played >= n
+        
+        # Update checkpoint if successful
+        if played:
+            self.current_checkpoint = n - 1
+        
+        # Clean up
+        if hasattr(self, '_target_animation'):
+            delattr(self, '_target_animation')
+        
+        # Reset counter
+        self._animations_played = 0
+        
+        return played
+    
     
     def get_namespace(self):
         """Get execution namespace with current checkpoint's locals."""
@@ -646,15 +812,26 @@ class Scene(GLScene):
         self.current_checkpoint = checkpoint_index
         self.current_animation_index = checkpoint_index  # Legacy support
         self.tight = False
+        
+        # Reset namespace when jumping to checkpoint 0 for a fresh start
+        if checkpoint_index == 0:
+            if self.shell is not None:
+                # Clear IPython namespace and re-add imports
+                self.shell.user_module.__dict__.clear()
+                self.shell.user_module.__dict__['self'] = self
+                self.shell.run_cell("from maniml import *", silent=True, store_history=False)
+            else:
+                self.code_namespace = {'self': self}
+                exec("from maniml import *", self.code_namespace)
+        
         self.update_frame(dt=0, force_draw=True)
         
         print(f"Jumped to checkpoint {checkpoint_index + 1}/{len(self.checkpoints)}")
     
     def jump_back(self):
-        """Jump to previous checkpoint (called by left/up arrow)."""
+        """Jump to previous checkpoint (called by up arrow)."""
         if self.current_checkpoint > 0:
-            self.current_checkpoint = self.current_checkpoint - 1
-            self.jump_to(self.current_checkpoint)
+            self.jump_to_n(self.current_checkpoint)
         else:
             print("Already at first checkpoint")
     
@@ -733,18 +910,18 @@ class Scene(GLScene):
             # Check if there's a next checkpoint
             if self.current_checkpoint + 1 < len(self.checkpoints):
                 # Jump to next checkpoint
-                self.jump_to(self.current_checkpoint + 1)
-            else:
-                # No next checkpoint, create new one
                 self._processing_key = True
                 try:
-                    if not self.tight:
-                        self.reexecute()
-                    
-                    # Reset the flag to allow next animation
-                    self._one_animation_executed = False
-                    success = self.run_next_code()
-                    if not success:
+                    self.jump_to_n(self.current_checkpoint + 2)
+                finally:
+                    self._processing_key = False
+            else:
+                # No next checkpoint, play next animation same as RIGHT arrow
+                self._processing_key = True
+                try:
+                    # Use play_n to play the next animation
+                    played = self.play_n(self.current_checkpoint + 2)
+                    if not played:
                         print("No more animations to run")
                 finally:
                     self._processing_key = False
@@ -759,7 +936,17 @@ class Scene(GLScene):
                 print("No animations recorded yet")
                 return
             
-            self.jump_back()
+            self._processing_key = True
+            try:
+                if self.current_checkpoint > 0:
+                    # Jump to previous checkpoint
+                    self.jump_to_n(self.current_checkpoint)
+                else:
+                    # Already at beginning
+                    self.jump_to_n(0)
+                    print("Already at the beginning")
+            finally:
+                self._processing_key = False
         
         # Handle RIGHT arrow - play next animation forward
         elif symbol == PygletWindowKeys.RIGHT:
@@ -769,13 +956,9 @@ class Scene(GLScene):
             
             self._processing_key = True
             try:
-                # If not tight, reexecute
-                #if True:#not self.tight:
-                self.reexecute()
-                
-                # Run next code (create next animation)
-                success = self.run_next_code()
-                if not success:
+                # Use play_n to play the next animation
+                played = self.play_n(self.current_checkpoint + 2)
+                if not played:
                     print("No more animations to run")
             finally:
                 self._processing_key = False
@@ -1638,70 +1821,63 @@ class Scene(GLScene):
         - caller_locals: Dict of local variables (deepcopied when possible)
         - animation_info: Dict with animation details for replay
         """
-        # Skip animations if we're in setup mode (for edit handling)
+        # Skip animations if we're in skip mode OR if we're doing animation counting
+        should_skip = False
+        
+        # Handle dynamic skipping for play_n
+        if hasattr(self, '_target_animation') and hasattr(self, '_animations_played'):
+            # For play_n: skip until we reach the target animation
+            if self._animations_played < self._target_animation - 1:
+                self.skip_animations = True
+            else:
+                self.skip_animations = False
+        
+        # Check if we're in skip mode
         if hasattr(self, '_skip_animations') and self._skip_animations:
+            should_skip = True
+        
+        # Check if we're doing animation counting and have played enough
+        elif hasattr(self, '_animations_to_play') and hasattr(self, '_animations_played'):
+            if self._animations_played >= self._animations_to_play:
+                should_skip = True
+            else:
+                # Count this animation
+                self._animations_played += 1
+        
+        if should_skip:
+            # Still need to add mobjects to the scene
+            from maniml.manimgl_core.animation.animation import prepare_animation
+            animations_list = []
+            for proto in animations:
+                anim = prepare_animation(proto)
+                animations_list.append(anim)
+            
+            # Add mobjects to scene (mimicking begin_animations behavior)
+            all_mobjects = set(self.get_mobject_family_members())
+            for animation in animations_list:
+                animation.begin()
+                if animation.mobject not in all_mobjects:
+                    self.add(animation.mobject)
+                    all_mobjects = all_mobjects.union(animation.mobject.get_family())
+            
             return animations[0] if animations else None
         
         is_navigating = hasattr(self, '_navigating_animations') and self._navigating_animations
         
-        # Check if we should stop after one animation (hot reload)
-        if hasattr(self, '_stop_after_one_animation') and self._stop_after_one_animation:
-            if hasattr(self, '_one_animation_executed') and self._one_animation_executed:
-                # Already executed one animation, skip the rest
-                return animations[0] if animations else None
-            else:
-                # This is the one animation to execute
-                self._one_animation_executed = True
-                # Don't override is_navigating - respect the _navigating_animations flag
-                
-                # If this is the very first animation, print navigation tip
-                if self.current_animation_index == -1:
-                    print("\n[Navigation] Use arrow keys to control animations:")
-                    print("  → Play next animation")
-                    print("  ↓ Jump to next animation")
-                    print("  ← Jump to previous animation")
-                    print("  ↑ Jump to previous animation")
+        # If this is the very first animation, print navigation tip
+        if self.current_animation_index == -1 and not is_navigating:
+            print("\n[Navigation] Use arrow keys to control animations:")
+            print("  → Play next animation")
+            print("  ↓ Jump to next animation")
+            print("  ← Jump to previous animation")
+            print("  ↑ Jump to previous animation")
         
         # Capture the animation info BEFORE playing
         if not is_navigating:
-            # Get the line number where this play was called
-            frame = inspect.currentframe().f_back
-            line_no = frame.f_lineno
-            
-            # If we're running from exec'd code, adjust the line number
-            if '__line_offset__' in frame.f_locals:
-                line_no += frame.f_locals['__line_offset__']
-            
-            # For multi-line statements, we need to find the end line
-            # This is a bit tricky, but we can look at the source code
-            if hasattr(self, '_scene_filepath') and self._scene_filepath:
-                try:
-                    import ast
-                    # Use updated content if available, otherwise file content
-                    if hasattr(self, '_updated_content') and self._updated_content:
-                        source = ''.join(self._updated_content)
-                    else:
-                        with open(self._scene_filepath, 'r') as f:
-                            source = f.read()
-                    
-                    # Parse the source to find the actual end line
-                    tree = ast.parse(source)
-                    
-                    # Find the node that contains our line
-                    for node in ast.walk(tree):
-                        if isinstance(node, ast.Call) and hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
-                            if node.lineno <= line_no <= (node.end_lineno or node.lineno):
-                                # Found our call, use the end line
-                                if node.end_lineno:
-                                    line_no = node.end_lineno
-                                break
-                except Exception as e:
-                    # If parsing fails, stick with the original line number
-                    pass
-            
             # Store the local variables from the calling frame
             # DON'T copy mobjects here - we want to maintain references to the originals
             # The scene state will handle copying for restoration
+            frame = inspect.currentframe().f_back
             caller_locals = {}
             for name, obj in frame.f_locals.items():
                 if not name.startswith('_') and name != 'self':
@@ -1723,7 +1899,6 @@ class Scene(GLScene):
             # Store basic animation info for debugging
             animation_info = {
                 'type': 'play',
-                'line_no': line_no,
                 'num_animations': len(animations),
             }
         
@@ -1745,7 +1920,7 @@ class Scene(GLScene):
             # Store in new system with both start and end states
             self.checkpoints.append((
                 self.current_checkpoint,
-                line_no,
+                -1,  # No longer using line numbers
                 start_state,    # State before animation
                 end_state,      # State after animation
                 caller_locals,
@@ -1755,12 +1930,11 @@ class Scene(GLScene):
             # Also store in legacy system for compatibility
             self.animation_checkpoints.append((
                 self.current_animation_index, 
-                line_no, 
+                -1,  # No longer using line numbers
                 end_state,      # Legacy system only stores end state
                 caller_locals,
                 animation_info if animation_info else None
             ))
-            print(f"[CHECKPOINT] Created checkpoint {self.current_checkpoint} at line {line_no}, total: {len(self.checkpoints)}")
             
             # Keep only last 50 checkpoints to avoid memory issues
             if len(self.checkpoints) > 50:
@@ -2050,6 +2224,48 @@ class Scene(GLScene):
                 if line.strip() and 'interactive_embed' not in line:
                     # Remove the base indentation
                     dedented = line[base_indent + 4:]  # +4 for method body indent
+                    code_lines.append(dedented)
+        
+        return ''.join(code_lines)
+    
+    def _extract_code_with_animation_count(self, content, animations_to_comment):
+        """
+        Extract code from construct method, commenting out the first N animations.
+        This avoids the line number tracking issues with exec/IPython.
+        """
+        in_construct = False
+        code_lines = []
+        base_indent = None
+        animations_seen = 0
+        
+        for i, line in enumerate(content):
+            if 'def construct(self):' in line:
+                in_construct = True
+                base_indent = len(line) - len(line.lstrip())
+                continue
+            
+            if in_construct:
+                # Check if we've exited construct
+                if line.strip() and not line[base_indent:].startswith(' '):
+                    break
+                
+                # Include all lines, even empty ones, to preserve structure
+                if 'interactive_embed' not in line:
+                    # Remove the base indentation
+                    if len(line) > base_indent + 4:
+                        dedented = line[base_indent + 4:]  # +4 for method body indent
+                    else:
+                        dedented = line[base_indent:] if len(line) > base_indent else line
+                    
+                    # Check if this line contains self.play(
+                    if 'self.play(' in dedented and not dedented.strip().startswith('#'):
+                        if animations_seen < animations_to_comment:
+                            # Comment out this animation
+                            leading_spaces = len(dedented) - len(dedented.lstrip())
+                            comment_prefix = ' ' * leading_spaces + '# Already executed: '
+                            dedented = comment_prefix + dedented.strip() + '\n'
+                            animations_seen += 1
+                    
                     code_lines.append(dedented)
         
         return ''.join(code_lines)
