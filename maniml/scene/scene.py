@@ -502,9 +502,17 @@ class Scene(GLScene):
         if not hasattr(self, '_scene_filepath') or not self._scene_filepath:
             return
             
+        # Clear the scene to ensure clean slate
+        self.clear()
+        
         # Get line number to execute up to
+        # We want to execute up to the NEXT checkpoint we're about to create
         checkpoint_line = 0
-        if 0 <= self.current_checkpoint < len(self.checkpoints):
+        if 0 <= self.current_checkpoint + 1 < len(self.checkpoints):
+            # If there's a next checkpoint, execute up to its line
+            checkpoint_line = self.checkpoints[self.current_checkpoint + 1][1]
+        elif 0 <= self.current_checkpoint < len(self.checkpoints):
+            # Otherwise, execute up to current checkpoint
             checkpoint_line = self.checkpoints[self.current_checkpoint][1]
         
         # Extract code up to that line
@@ -568,17 +576,6 @@ class Scene(GLScene):
                 namespace.update(stored_locals)
         
         return namespace
-    
-    def play_forward(self):
-        """Play animation at next checkpoint by re-executing code."""
-        next_index = self.current_checkpoint + 1
-        
-        if next_index >= len(self.checkpoints):
-            print("No next animation to play")
-            return False
-            
-        # Always use re-execution approach
-        return self.run_next_animation(self.current_checkpoint)
     
     def jump_to(self, checkpoint_index):
         """Jump instantly to a checkpoint's final state."""
@@ -716,20 +713,14 @@ class Scene(GLScene):
             
             self._processing_key = True
             try:
-                # Check if next checkpoint exists
-                if self.current_checkpoint + 1 < len(self.checkpoints):
-                    # Play animation forward
-                    self.play_forward()
-                else:
-                    # Need to create new checkpoint
-                    if not self.tight:
-                        self.reexecute()
-                    
-                    # Reset the flag to allow next animation
-                    self._one_animation_executed = False
-                    success = self.run_next_code()
-                    if not success:
-                        print("No more animations to run")
+                # If not tight, reexecute
+                if not self.tight:
+                    self.reexecute()
+                
+                # Run next code (create next animation)
+                success = self.run_next_code()
+                if not success:
+                    print("No more animations to run")
             finally:
                 self._processing_key = False
         

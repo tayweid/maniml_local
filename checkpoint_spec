@@ -46,11 +46,6 @@ def run_exec(code, namespace, animations=True):
 def comment_out_to_line(line):
 	# Comment out or delete the code upto and including line
 
-def play_forward():
-	# Use the existing next checkpoint's animation to animate forward
-
-	tight = False
-
 def reexecute():
 	# Run all code without animation up through some line number
 
@@ -66,15 +61,10 @@ def right_arrow():
 	# Update checkpoint
 	current_checkpoint += 1
 
-	# If there's a next checkpoint, play it
-	if checkpoints[current_checkpoint]:
-		play_forward()
-
-	# If there's not a next checkpoint, create it
-	else:
-		if not tight:
-			reexecute()
-		run_next_code()
+	# If not tight, reexecute
+	if not tight:
+		reexecute()
+	run_next_code()
 
 def down_arrow():
 	# Runs on down arrow key
