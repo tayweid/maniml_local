@@ -488,14 +488,14 @@ class Scene(GLScene):
         """Initialize checkpoint system with blank screen as checkpoint 0."""
         # Create initial blank checkpoint
         # For checkpoint 0, start and end state are the same (blank scene)
-        # Use line -1 to indicate no lines should be executed before checkpoint 0
+        # Use line 0 to indicate no lines should be executed before checkpoint 0
         blank_state = self.get_state()
-        self.checkpoints = [(0, -1, blank_state, blank_state, {}, None)]
+        self.checkpoints = [(0, 0, blank_state, blank_state, {}, None)]
         self.current_checkpoint = 0
         self.tight = True
         
         # Also update legacy system for compatibility
-        self.animation_checkpoints = [(0, -1, blank_state, {}, None)]
+        self.animation_checkpoints = [(0, 0, blank_state, {}, None)]
         self.current_animation_index = 0
     
     def run_next_code(self):
@@ -669,97 +669,157 @@ class Scene(GLScene):
         
         return ''.join(code_lines)
     
+    def _extract_nth_animation_code(self, n):
+        """Extract code for animation n by commenting out everything before."""
+        print(f"\n[DEBUG] Extracting code for animation {n}")
+        
+        if n <= 1:
+            # First animation, return full code
+            print("[DEBUG] First animation, returning full code")
+            return self._extract_construct_code()
+        
+        if not hasattr(self, '_scene_filepath'):
+            return ""
+        
+        # Get line number where animation n-1 ENDS (after the play() call)
+        if n - 2 >= len(self.checkpoints):
+            return ""
+            
+        prev_checkpoint = self.checkpoints[n - 2]
+        comment_up_to_line = prev_checkpoint[1]  # Line number after previous animation
+        print(f"[DEBUG] Previous checkpoint (animation {n-1}) ended at line {comment_up_to_line}")
+        
+        # Use updated content if available, otherwise current file
+        if hasattr(self, '_updated_content') and self._updated_content:
+            content = self._updated_content
+        else:
+            try:
+                with open(self._scene_filepath, 'r') as f:
+                    content = f.readlines()
+            except:
+                return ""
+        
+        in_construct = False
+        code_lines = []
+        base_indent = None
+        
+        for i, line in enumerate(content):
+            line_no = i + 1
+            
+            if 'def construct(self):' in line:
+                in_construct = True
+                base_indent = len(line) - len(line.lstrip())
+                continue
+            
+            if in_construct:
+                # Check if we've exited construct
+                if line.strip() and not line[base_indent:].startswith(' '):
+                    break
+                
+                # Skip interactive_embed lines
+                if 'interactive_embed' in line:
+                    continue
+                
+                # Remove the base indentation
+                if len(line) > base_indent + 4:
+                    dedented = line[base_indent + 4:]  # +4 for method body indent
+                else:
+                    dedented = line[base_indent:] if len(line) > base_indent else line
+                
+                # Comment out lines up to the checkpoint
+                if line_no <= comment_up_to_line:
+                    if dedented.strip():  # Only comment non-empty lines
+                        code_lines.append('# ' + dedented)
+                    else:
+                        code_lines.append(dedented)
+                else:
+                    code_lines.append(dedented)
+        
+        print(f"[DEBUG] Code to execute:\n{''.join(code_lines[:200])}...")
+        return ''.join(code_lines)
+    
     
     def jump_to_n(self, n):
-        """Jump to state after n animations without playing them."""
+        """Jump to checkpoint n by restoring visual state only."""
         if n <= 0:
+            # Restore to blank state
             self.clear()
             self.current_checkpoint = 0
             return
-            
-        # Only clear the scene visually
-        self.clear()
         
-        # Reset namespace but preserve essential imports
-        if self.shell is not None:
-            # Save essential references
-            saved_refs = {}
-            for key in ['maniml', 'manim', 'Circle', 'Square', 'Create', 'BLUE', 'RED', 'UP', 'DOWN', 'RIGHT', 'LEFT']:
-                if key in self.shell.user_module.__dict__:
-                    saved_refs[key] = self.shell.user_module.__dict__[key]
-            
-            # Clear user-defined variables only
-            keys_to_remove = []
-            for key in self.shell.user_module.__dict__:
-                if not key.startswith('_') and key not in saved_refs and key != 'self':
-                    keys_to_remove.append(key)
-            
-            for key in keys_to_remove:
-                del self.shell.user_module.__dict__[key]
-            
-            # Ensure self is available
-            self.shell.user_module.__dict__['self'] = self
-        
-        # Set animation counter to play n animations
-        self._animations_to_play = n
-        self._animations_played = 0
-        
-        # Extract construct code
-        code = self._extract_construct_code()
-        
-        if not code.strip():
-            print("No code to execute")
+        if n > len(self.checkpoints):
+            print(f"Checkpoint {n} doesn't exist yet")
             return
+            
+        # Get the checkpoint
+        checkpoint = self.checkpoints[n - 1]
+        end_state = checkpoint[3]  # State after animation
         
-        # Execute with skip_animations = True
-        original_skip = self.skip_animations
-        self.skip_animations = True
-        try:
-            result = self.shell.run_cell(code, silent=True, store_history=False)
-            if result.error_in_exec:
-                print(f"Error executing code: {result.error_in_exec}")
-                return
-        except Exception as e:
-            print(f"Error in jump_to_n: {e}")
-            import traceback
-            traceback.print_exc()
-            return
-        finally:
-            self.skip_animations = original_skip
+        # Restore only the visual state (mobjects)
+        self.restore_state(end_state)
         
-        # Update checkpoint
+        # Update checkpoint index
         self.current_checkpoint = n - 1
         
-        # Reset counter
-        self._animations_played = 0
+        # Force redraw
+        self.update_frame(dt=0, force_draw=True)
     
     def play_n(self, n):
-        """Play only the nth animation (1-indexed)."""
+        """Play only animation n from restored state."""
+        print(f"\n[DEBUG] play_n({n}) called")
+        print(f"[DEBUG] Current checkpoint: {self.current_checkpoint}")
+        print(f"[DEBUG] Total checkpoints: {len(self.checkpoints)}")
+        
         if n <= 0:
             return False
+        
+        # First restore to state before animation n
+        if n > 1:
+            if n - 2 >= len(self.checkpoints):
+                print(f"Cannot play animation {n} - not enough checkpoints")
+                return False
+            # Restore to end state of animation n-1
+            prev_checkpoint = self.checkpoints[n - 2]
+            self.restore_state(prev_checkpoint[3])  # end_state
             
-        # Only clear the scene visually
-        self.clear()
+            # Also restore the namespace from that checkpoint
+            stored_locals = prev_checkpoint[4]  # caller_locals
+            if stored_locals and self.shell is not None:
+                # Update namespace with stored variables
+                self.shell.user_module.__dict__.update(stored_locals)
+                print(f"[DEBUG] Restored namespace with variables: {list(stored_locals.keys())}")
+        else:
+            # Clear for first animation
+            self.clear()
+            # Clear namespace too
+            if self.shell is not None:
+                # Keep only essential imports
+                keys_to_keep = {'self', 'maniml', 'manim', 'Circle', 'Square', 'Create', 
+                                'BLUE', 'RED', 'GREEN', 'YELLOW', 'UP', 'DOWN', 'RIGHT', 'LEFT'}
+                keys_to_remove = [k for k in self.shell.user_module.__dict__ 
+                                 if k not in keys_to_keep and not k.startswith('_')]
+                for key in keys_to_remove:
+                    del self.shell.user_module.__dict__[key]
         
-        # Don't clear the namespace - just ensure self is available
-        if self.shell is not None:
-            self.shell.user_module.__dict__['self'] = self
-        
-        # Set animation counter
-        self._animations_to_play = n
-        self._animations_played = 0
-        self._target_animation = n  # New flag to know when to turn off skipping
-        
-        # Extract construct code
-        code = self._extract_construct_code()
+        # Extract code with previous animations commented out
+        code = self._extract_nth_animation_code(n)
         
         if not code.strip():
             print("No code to execute")
             return False
         
-        # Execute - we'll handle skip_animations dynamically in play()
+        # Execute the code - only animation n should run
+        # Set up to stop after one animation
+        self._animations_to_play = 1
+        self._animations_played = 0
+        
         try:
+            # Ensure self is available in namespace
+            if self.shell is not None:
+                self.shell.user_module.__dict__['self'] = self
+            
             result = self.shell.run_cell(code, silent=True, store_history=False)
+            
             if result.error_in_exec:
                 print(f"Error executing code: {result.error_in_exec}")
                 return False
@@ -770,15 +830,11 @@ class Scene(GLScene):
             return False
         
         # Check if we played the animation
-        played = self._animations_played >= n
+        played = self._animations_played > 0
         
-        # Update checkpoint if successful
+        # Update checkpoint
         if played:
             self.current_checkpoint = n - 1
-        
-        # Clean up
-        if hasattr(self, '_target_animation'):
-            delattr(self, '_target_animation')
         
         # Reset counter
         self._animations_played = 0
@@ -1824,14 +1880,6 @@ class Scene(GLScene):
         # Skip animations if we're in skip mode OR if we're doing animation counting
         should_skip = False
         
-        # Handle dynamic skipping for play_n
-        if hasattr(self, '_target_animation') and hasattr(self, '_animations_played'):
-            # For play_n: skip until we reach the target animation
-            if self._animations_played < self._target_animation - 1:
-                self.skip_animations = True
-            else:
-                self.skip_animations = False
-        
         # Check if we're in skip mode
         if hasattr(self, '_skip_animations') and self._skip_animations:
             should_skip = True
@@ -1905,12 +1953,50 @@ class Scene(GLScene):
         # Capture start state BEFORE playing animation
         if not is_navigating:
             start_state = self.get_state()
+            
+            # Get the actual line number from the calling frame
+            frame = inspect.currentframe().f_back
+            line_no = frame.f_lineno
+            
+            # Try to get the real line number from IPython's context
+            # IPython stores the original line number mapping
+            if hasattr(self, '_current_line_in_file'):
+                line_no = self._current_line_in_file
+            
+            # For multi-line play() calls, we need to find where the statement ends
+            # We'll store the start line and use a heuristic to find the end
+            play_start_line = line_no
         
         # Always play the animation normally
         result = super().play(*animations, **kwargs)
         
         # Only save checkpoints if we're NOT navigating with arrow keys
         if not is_navigating:
+            # Get the line number AFTER play completes
+            # We need to look at the calling frame to get the actual line in the user's code
+            frame = inspect.currentframe()
+            user_frame = None
+            
+            # Walk up the stack to find the frame in the user's file
+            while frame:
+                filename = frame.f_code.co_filename
+                if self._scene_filepath and filename == self._scene_filepath:
+                    user_frame = frame
+                    break
+                frame = frame.f_back
+            
+            if user_frame:
+                line_no_after = user_frame.f_lineno
+            else:
+                # Fallback
+                line_no_after = line_no
+            
+            print(f"\n[DEBUG] Saving checkpoint {self.current_checkpoint + 1}")
+            print(f"[DEBUG] Scene filepath: {self._scene_filepath}")
+            print(f"[DEBUG] Line before play: {line_no}")
+            print(f"[DEBUG] Line after play: {line_no_after}")
+            print(f"[DEBUG] Frame filename: {frame.f_code.co_filename if frame else 'None'}")
+            
             # Always create a new checkpoint when playing forward
             # Never replay existing checkpoints
             self.current_animation_index += 1
@@ -1920,7 +2006,7 @@ class Scene(GLScene):
             # Store in new system with both start and end states
             self.checkpoints.append((
                 self.current_checkpoint,
-                -1,  # No longer using line numbers
+                line_no_after,  # Store line number after play completes
                 start_state,    # State before animation
                 end_state,      # State after animation
                 caller_locals,
@@ -1930,7 +2016,7 @@ class Scene(GLScene):
             # Also store in legacy system for compatibility
             self.animation_checkpoints.append((
                 self.current_animation_index, 
-                -1,  # No longer using line numbers
+                line_no_after,  # Store line number after play completes
                 end_state,      # Legacy system only stores end state
                 caller_locals,
                 animation_info if animation_info else None
