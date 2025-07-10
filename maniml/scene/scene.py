@@ -429,13 +429,14 @@ class Scene(GLScene):
         """Initialize checkpoint system with blank screen as checkpoint 0."""
         # Create initial blank checkpoint
         # For checkpoint 0, start and end state are the same (blank scene)
+        # Use line -1 to indicate no lines should be executed before checkpoint 0
         blank_state = self.get_state()
-        self.checkpoints = [(0, 0, blank_state, blank_state, {}, None)]
+        self.checkpoints = [(0, -1, blank_state, blank_state, {}, None)]
         self.current_checkpoint = 0
         self.tight = True
         
         # Also update legacy system for compatibility
-        self.animation_checkpoints = [(0, 0, blank_state, {}, None)]
+        self.animation_checkpoints = [(0, -1, blank_state, {}, None)]
         self.current_animation_index = 0
     
     def run_next_code(self):
@@ -443,22 +444,36 @@ class Scene(GLScene):
         if not hasattr(self, '_scene_filepath') or not self._scene_filepath:
             return False
             
+        print(f"\n[DEBUG RUN_NEXT_CODE] Starting run_next_code()")
+        print(f"[DEBUG RUN_NEXT_CODE] current_checkpoint = {self.current_checkpoint}")
+        
         # Get current checkpoint line number
         current_line = 0
         if self.current_checkpoint >= 0 and self.current_checkpoint < len(self.checkpoints):
             current_line = self.checkpoints[self.current_checkpoint][1]
         
+        print(f"[DEBUG RUN_NEXT_CODE] Current line to comment up to: {current_line}")
+        
         # Extract code with comments up to current line
         code = self.comment_out_to_line(current_line)
+        print(f"[DEBUG RUN_NEXT_CODE] Extracted code ({len(code)} chars):")
+        print("=" * 50)
+        print(code)
+        print("=" * 50)
         
         # Get namespace with stored locals
         namespace = self.get_namespace()
+        print(f"[DEBUG RUN_NEXT_CODE] Namespace has {len(namespace)} items")
         
         # Execute code with animations enabled
+        print(f"[DEBUG RUN_NEXT_CODE] Running code with animations...")
         return self.run_exec(code, namespace, animations=True)
     
     def run_exec(self, code, namespace, animations=True):
         """Execute code with optional animation suppression."""
+        print(f"\n[DEBUG RUN_EXEC] animations={animations}")
+        print(f"[DEBUG RUN_EXEC] Mobjects before exec: {len(self.mobjects)}")
+        
         # Set flags for animation control
         self._stop_after_one_animation = True
         self._one_animation_executed = False
@@ -476,11 +491,16 @@ class Scene(GLScene):
                     break
             
             if not has_executable:
+                print(f"[DEBUG RUN_EXEC] No executable code found")
                 return False
             
             # Compile and execute
             compiled = compile(code, self._scene_filepath, 'exec')
             exec(compiled, namespace)
+            
+            print(f"[DEBUG RUN_EXEC] After exec, mobjects = {len(self.mobjects)}")
+            for i, mob in enumerate(self.mobjects):
+                print(f"  [{i}] {type(mob).__name__}")
             
             # Return whether we executed an animation
             return self._one_animation_executed
@@ -502,28 +522,64 @@ class Scene(GLScene):
         if not hasattr(self, '_scene_filepath') or not self._scene_filepath:
             return
             
+        print(f"\n[DEBUG REEXECUTE] Starting reexecute()")
+        print(f"[DEBUG REEXECUTE] current_checkpoint = {self.current_checkpoint}")
+        print(f"[DEBUG REEXECUTE] Number of checkpoints = {len(self.checkpoints)}")
+        
         # Clear the scene to ensure clean slate
         self.clear()
+        print(f"[DEBUG REEXECUTE] Scene cleared, mobjects = {len(self.mobjects)}")
         
         # Get line number to execute up to
-        # We want to execute up to the NEXT checkpoint we're about to create
-        checkpoint_line = 0
-        if 0 <= self.current_checkpoint + 1 < len(self.checkpoints):
-            # If there's a next checkpoint, execute up to its line
-            checkpoint_line = self.checkpoints[self.current_checkpoint + 1][1]
-        elif 0 <= self.current_checkpoint < len(self.checkpoints):
-            # Otherwise, execute up to current checkpoint
-            checkpoint_line = self.checkpoints[self.current_checkpoint][1]
+        # We want to execute up to the current checkpoint
+        checkpoint_line = self.checkpoints[self.current_checkpoint][1]
+        print(f"[DEBUG REEXECUTE] Using next checkpoint line: {checkpoint_line}")
         
         # Extract code up to that line
         code = self.code_upto_line(checkpoint_line)
+        print(f"[DEBUG REEXECUTE] Extracted code ({len(code)} chars):")
+        print("=" * 50)
+        print(code)
+        print("=" * 50)
+        
+        # Count actual lines in the extracted code
+        code_lines = code.split('\n')
+        non_empty_lines = [line for line in code_lines if line.strip()]
+        if non_empty_lines:
+            print(f"[DEBUG REEXECUTE] Last line to execute: '{non_empty_lines[-1].strip()}'")
+        else:
+            print(f"[DEBUG REEXECUTE] No lines to execute")
         
         # Get fresh namespace (no stored locals for re-execution)
         namespace = {'self': self}
         exec("from maniml import *", namespace)
         
         # Run without animations
-        self.run_exec(code, namespace, animations=False)
+        print(f"[DEBUG REEXECUTE] Running code without animations...")
+        
+        # Add a simple trace to see what lines execute
+        self._reexecute_lines = []
+        def trace_lines(frame, event, arg):
+            if event == 'line' and frame.f_code.co_filename == self._scene_filepath:
+                line_no = frame.f_lineno
+                if line_no not in self._reexecute_lines:
+                    self._reexecute_lines.append(line_no)
+            return trace_lines
+        
+        import sys
+        old_trace = sys.gettrace()
+        sys.settrace(trace_lines)
+        try:
+            self.run_exec(code, namespace, animations=False)
+        finally:
+            sys.settrace(old_trace)
+            if self._reexecute_lines:
+                print(f"[DEBUG REEXECUTE] Lines executed: {sorted(self._reexecute_lines)}")
+                print(f"[DEBUG REEXECUTE] Last line executed: {max(self._reexecute_lines)}")
+        
+        print(f"[DEBUG REEXECUTE] After reexecute, mobjects = {len(self.mobjects)}")
+        for i, mob in enumerate(self.mobjects):
+            print(f"  [{i}] {type(mob).__name__}")
         
         # Mark as tight since we're caught up
         self.tight = True
@@ -597,7 +653,7 @@ class Scene(GLScene):
     def jump_back(self):
         """Jump to previous checkpoint (called by left/up arrow)."""
         if self.current_checkpoint > 0:
-            self.current_checkpoint -= 1
+            self.current_checkpoint = self.current_checkpoint - 1
             self.jump_to(self.current_checkpoint)
         else:
             print("Already at first checkpoint")
@@ -714,8 +770,8 @@ class Scene(GLScene):
             self._processing_key = True
             try:
                 # If not tight, reexecute
-                if not self.tight:
-                    self.reexecute()
+                #if True:#not self.tight:
+                self.reexecute()
                 
                 # Run next code (create next animation)
                 success = self.run_next_code()
@@ -1680,45 +1736,31 @@ class Scene(GLScene):
         
         # Only save checkpoints if we're NOT navigating with arrow keys
         if not is_navigating:
-            # Check if we're replaying an existing checkpoint
-            # If current_checkpoint + 1 already has a checkpoint at this line, don't create a new one
-            next_index = self.current_checkpoint + 1
-            should_create_checkpoint = True
+            # Always create a new checkpoint when playing forward
+            # Never replay existing checkpoints
+            self.current_animation_index += 1
+            self.current_checkpoint += 1
+            end_state = self.get_state()
             
-            if next_index < len(self.checkpoints):
-                existing_checkpoint = self.checkpoints[next_index]
-                if existing_checkpoint[1] == line_no:  # Same line number
-                    # We're replaying an existing checkpoint, don't create a new one
-                    should_create_checkpoint = False
-                    self.current_checkpoint = next_index
-                    self.current_animation_index = next_index  # Legacy support
-                    print(f"[CHECKPOINT] Replayed existing checkpoint {self.current_checkpoint} at line {line_no}")
+            # Store in new system with both start and end states
+            self.checkpoints.append((
+                self.current_checkpoint,
+                line_no,
+                start_state,    # State before animation
+                end_state,      # State after animation
+                caller_locals,
+                animation_info
+            ))
             
-            if should_create_checkpoint:
-                # Save checkpoint AFTER animation completes
-                self.current_animation_index += 1
-                self.current_checkpoint += 1
-                end_state = self.get_state()
-                
-                # Store in new system with both start and end states
-                self.checkpoints.append((
-                    self.current_checkpoint,
-                    line_no,
-                    start_state,    # State before animation
-                    end_state,      # State after animation
-                    caller_locals,
-                    animation_info
-                ))
-                
-                # Also store in legacy system for compatibility
-                self.animation_checkpoints.append((
-                    self.current_animation_index, 
-                    line_no, 
-                    end_state,      # Legacy system only stores end state
-                    caller_locals,
-                    animation_info if animation_info else None
-                ))
-                print(f"[CHECKPOINT] Created checkpoint {self.current_checkpoint} at line {line_no}, total: {len(self.checkpoints)}")
+            # Also store in legacy system for compatibility
+            self.animation_checkpoints.append((
+                self.current_animation_index, 
+                line_no, 
+                end_state,      # Legacy system only stores end state
+                caller_locals,
+                animation_info if animation_info else None
+            ))
+            print(f"[CHECKPOINT] Created checkpoint {self.current_checkpoint} at line {line_no}, total: {len(self.checkpoints)}")
             
             # Keep only last 50 checkpoints to avoid memory issues
             if len(self.checkpoints) > 50:
@@ -1929,138 +1971,6 @@ class Scene(GLScene):
             if hasattr(self, '_one_animation_executed'):
                 self._one_animation_executed = False
     
-    def remap_animation_mobjects(self, animations, stored_id_map, prev_checkpoint=None):
-        """
-        Remap animation mobject references to current scene mobjects.
-        Uses the order of mobjects in the scene to map stored references.
-        """
-        # Create a type-based mapping
-        # Group scene mobjects by type
-        scene_mobs_by_type = {}
-        for mob in self.mobjects:
-            mob_type = type(mob).__name__
-            if mob_type not in scene_mobs_by_type:
-                scene_mobs_by_type[mob_type] = []
-            scene_mobs_by_type[mob_type].append(mob)
-        
-        # Group stored mobjects by type
-        stored_mobs_by_type = {}
-        for stored_mob in stored_id_map.values():
-            mob_type = type(stored_mob).__name__
-            if mob_type not in stored_mobs_by_type:
-                stored_mobs_by_type[mob_type] = []
-            stored_mobs_by_type[mob_type].append(stored_mob)
-        
-        # Create mapping based on order within each type
-        stored_to_scene = {}
-        for mob_type in stored_mobs_by_type:
-            if mob_type in scene_mobs_by_type:
-                stored_list = stored_mobs_by_type[mob_type]
-                scene_list = scene_mobs_by_type[mob_type]
-                # Map by index - first stored Circle maps to first scene Circle, etc
-                for i, stored_mob in enumerate(stored_list):
-                    if i < len(scene_list):
-                        stored_to_scene[stored_mob] = scene_list[i]
-        
-        # Remap animations
-        for anim in animations:
-            if hasattr(anim, 'mobject') and anim.mobject in stored_to_scene:
-                anim.mobject = stored_to_scene[anim.mobject]
-                
-            if hasattr(anim, 'target_mobject') and anim.target_mobject and anim.target_mobject in stored_to_scene:
-                anim.target_mobject = stored_to_scene[anim.target_mobject]
-    
-    def play_next_animation(self, current_checkpoint):
-        """
-        Play the stored animation at the next checkpoint.
-        Uses stored animation objects with remapped mobject references.
-        """
-        self._processing_key = True
-        
-        try:
-            next_index = current_checkpoint + 1
-            
-            if next_index >= len(self.animation_checkpoints):
-                print("No next animation to play")
-                return False
-            
-            next_checkpoint = self.animation_checkpoints[next_index]
-            
-            # Restore to state BEFORE this animation
-            if next_index > 0:
-                prev_checkpoint = self.animation_checkpoints[next_index - 1]
-                self.restore_state(prev_checkpoint[2])
-            else:
-                # First animation - restore to initial blank checkpoint
-                if self.animation_checkpoints:
-                    self.restore_state(self.animation_checkpoints[0][2])
-                else:
-                    # Fallback if no checkpoints exist
-                    self.clear()
-            
-            print(f"Playing animation {next_index + 1}/{len(self.animation_checkpoints)}")
-            
-            # Debug: print what's in this checkpoint
-            if len(next_checkpoint) > 4:
-                anim_info = next_checkpoint[4]
-                if 'animations' in anim_info:
-                    print(f"  Contains {len(anim_info['animations'])} animations:")
-                    for i, anim in enumerate(anim_info['animations']):
-                        print(f"    {i}: {type(anim).__name__} on {type(anim.mobject).__name__ if hasattr(anim, 'mobject') else 'N/A'}")
-            
-            # Check if checkpoint has animation info
-            if len(next_checkpoint) > 4 and isinstance(next_checkpoint[4], dict):
-                animation_info = next_checkpoint[4]
-                
-                # Set navigating flag to prevent new checkpoints
-                self._navigating_animations = True
-                try:
-                    if animation_info['type'] == 'play' and 'animations' in animation_info:
-                        stored_animations = animation_info['animations']
-                        kwargs = animation_info.get('kwargs', {})
-                        
-                        # Create fresh copies of the animations to avoid state contamination
-                        animations = []
-                        for anim in stored_animations:
-                            # Use the animation's copy method if available
-                            if hasattr(anim, 'copy'):
-                                anim_copy = anim.copy()
-                            else:
-                                # Fallback to deepcopy
-                                import copy
-                                anim_copy = copy.deepcopy(anim)
-                            animations.append(anim_copy)
-                        
-                        # Remap animation mobject references to current scene mobjects
-                        if 'mobject_id_map' in animation_info:
-                            self.remap_animation_mobjects(animations, animation_info['mobject_id_map'])
-                        
-                        # Play the remapped animations
-                        self.play(*animations, **kwargs)
-                        
-                        # Update index after successful playback
-                        self.current_animation_index = next_index
-                        return True
-                    else:
-                        # Fallback to run_next_animation for old checkpoints
-                        print("Using fallback: re-executing code")
-                        self._navigating_animations = False
-                        return self.run_next_animation(current_checkpoint)
-                    
-                finally:
-                    self._navigating_animations = False
-            else:
-                # No animation info - use run_next_animation
-                print("No animation info - re-executing code")
-                return self.run_next_animation(current_checkpoint)
-                
-        except Exception as e:
-            print(f"Error in play_next_animation: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-        finally:
-            self._processing_key = False
     
     def jump_to_next_animation(self, current_checkpoint):
         """
@@ -2178,7 +2088,8 @@ class Scene(GLScene):
                         dedented = line[base_indent:] if len(line) > base_indent else line
                     
                     # Comment out lines up to and including comment_up_to_line
-                    if line_no <= comment_up_to_line and line.strip():
+                    # Special case: if comment_up_to_line is -1, don't comment anything
+                    if comment_up_to_line >= 0 and line_no <= comment_up_to_line and line.strip():
                         # Keep original indentation when commenting
                         # Find the amount of leading whitespace after dedenting
                         leading_spaces = len(dedented) - len(dedented.lstrip())
