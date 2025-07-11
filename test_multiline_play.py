@@ -3,6 +3,7 @@ from maniml import *
 class TestMultilinePlay(Scene):
     def construct(self):
         print("\n=== Testing Multi-line play() Navigation ===")
+        print("[DEBUG] Testing line tracking injection")
         
         # Animation 1: Single line
         circle = Circle(color=BLUE)
@@ -36,3 +37,4 @@ class TestMultilinePlay(Scene):
         
         print("\n[TEST] Try navigating with arrow keys!")
         print("Multi-line play() calls should work correctly")
+        self.interactive_embed()

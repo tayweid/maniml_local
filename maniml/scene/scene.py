@@ -564,13 +564,16 @@ class Scene(GLScene):
     
     def _execute_code(self, code, namespace):
         """Helper to execute code using IPython or exec."""
+        # Inject line tracking before execution
+        tracked_code = self._inject_line_tracking(code)
+        
         # Use IPython shell if available, otherwise fall back to exec
         if self.shell is not None:
             # Update the shell's namespace with the provided namespace
             self.shell.user_module.__dict__.update(namespace)
             
-            # Execute using IPython's run_cell
-            result = self.shell.run_cell(code, silent=True, store_history=False)
+            # Execute using IPython's run_cell with tracked code
+            result = self.shell.run_cell(tracked_code, silent=True, store_history=False)
             
             # Check for errors
             if result.error_in_exec:
@@ -578,7 +581,7 @@ class Scene(GLScene):
                 raise result.error_in_exec
         else:
             # Fallback to exec if IPython is not available
-            compiled = compile(code, self._scene_filepath, 'exec')
+            compiled = compile(tracked_code, self._scene_filepath, 'exec')
             exec(compiled, namespace)
     
     def reexecute(self):
@@ -615,9 +618,10 @@ class Scene(GLScene):
         
         # Execute the code - animation counting will handle skipping
         if self.shell is not None:
-            self.run_exec_in_namespace(code, self.shell.user_module.__dict__, animations=True)
+            # Use _execute_code which injects line tracking
+            self._execute_code(code, self.shell.user_module.__dict__)
         else:
-            self.run_exec_in_namespace(code, self.code_namespace, animations=True)
+            self._execute_code(code, self.code_namespace)
         
         # Reset animation counter for next operation
         self._animations_played = 0
@@ -627,6 +631,106 @@ class Scene(GLScene):
     
     
     
+    def _inject_line_tracking(self, code):
+        """Inject line tracking statements before each code line."""
+        # If code is empty, return as is
+        if not code.strip():
+            return code
+        
+        try:
+            # Find the starting line number from the original file
+            if hasattr(self, '_construct_start_line'):
+                base_line = self._construct_start_line
+            else:
+                # Try to find construct method start line
+                base_line = self._find_construct_start_line()
+            
+            # Simple line-by-line injection approach
+            lines = code.split('\n')
+            tracked_lines = []
+            
+            for i, line in enumerate(lines):
+                # Skip empty lines and comments
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    tracked_lines.append(line)
+                    continue
+                
+                # Calculate actual line number in the original file
+                actual_line = base_line + i
+                
+                # Get indentation of current line
+                indent = len(line) - len(line.lstrip())
+                indent_str = ' ' * indent
+                
+                # Check if this line might contain a play() call
+                # We inject tracking before lines that could have play()
+                # Avoid false positives on print statements
+                if any(keyword in line for keyword in ['self.play(', 'self.wait(']):
+                    # Add line tracking before this line
+                    tracked_lines.append(f"{indent_str}self._current_line_in_file = {actual_line}")
+                    tracked_lines.append(line)
+                    # Check if this is a multi-line statement
+                    if line.rstrip().endswith('('):
+                        # This starts a multi-line statement
+                        # We'll track the end when we see the closing parenthesis
+                        pass
+                    else:
+                        # Single line statement - track the line after
+                        tracked_lines.append(f"{indent_str}self._current_line_in_file = {actual_line + 1}")
+                elif i > 0 and ')' in line:
+                    # This might be the end of a multi-line play() call
+                    # Check if we're in a multi-line play context
+                    # Look back to find if there's an open play() call
+                    in_play_call = False
+                    open_parens = 0
+                    for j in range(i-1, max(0, i-10), -1):
+                        if 'self.play(' in lines[j]:
+                            in_play_call = True
+                            break
+                        # Count parentheses to ensure we're still in the same call
+                        open_parens += lines[j].count('(') - lines[j].count(')')
+                        if open_parens < 0:
+                            break
+                    
+                    if in_play_call and line.strip() == ')':
+                        # This is the closing parenthesis of a play() call
+                        tracked_lines.append(line)
+                        # Add tracking after the closing parenthesis with the correct line number
+                        # The actual line in the file is base_line + i (current line in extracted code)
+                        tracked_lines.append(f"{indent_str}self._current_line_in_file = {actual_line + 1}")
+                    else:
+                        tracked_lines.append(line)
+                else:
+                    tracked_lines.append(line)
+            
+            tracked_code = '\n'.join(tracked_lines)
+            
+            return tracked_code
+            
+        except Exception as e:
+            print(f"[DEBUG] Failed to inject line tracking: {e}")
+            import traceback
+            traceback.print_exc()
+            # If injection fails, return original code
+            return code
+    
+    def _find_construct_start_line(self):
+        """Find the line number where construct method starts."""
+        if not hasattr(self, '_scene_filepath'):
+            return 1
+            
+        try:
+            with open(self._scene_filepath, 'r') as f:
+                for i, line in enumerate(f, 1):
+                    if 'def construct(self):' in line:
+                        # Return line after def construct
+                        return i + 1
+        except:
+            pass
+        
+        return 1
+
     def _extract_construct_code(self):
         """Extract just the construct method body."""
         if not hasattr(self, '_scene_filepath'):
@@ -645,11 +749,15 @@ class Scene(GLScene):
         in_construct = False
         code_lines = []
         base_indent = None
+        construct_line = 0
         
-        for line in content:
+        for i, line in enumerate(content):
             if 'def construct(self):' in line:
                 in_construct = True
                 base_indent = len(line) - len(line.lstrip())
+                construct_line = i + 1  # Store construct start line (1-indexed)
+                # Store it for line tracking
+                self._construct_start_line = construct_line + 1  # Line after def
                 continue
             
             if in_construct:
@@ -671,11 +779,8 @@ class Scene(GLScene):
     
     def _extract_nth_animation_code(self, n):
         """Extract code for animation n by commenting out everything before."""
-        print(f"\n[DEBUG] Extracting code for animation {n}")
-        
         if n <= 1:
             # First animation, return full code
-            print("[DEBUG] First animation, returning full code")
             return self._extract_construct_code()
         
         if not hasattr(self, '_scene_filepath'):
@@ -687,7 +792,6 @@ class Scene(GLScene):
             
         prev_checkpoint = self.checkpoints[n - 2]
         comment_up_to_line = prev_checkpoint[1]  # Line number after previous animation
-        print(f"[DEBUG] Previous checkpoint (animation {n-1}) ended at line {comment_up_to_line}")
         
         # Use updated content if available, otherwise current file
         if hasattr(self, '_updated_content') and self._updated_content:
@@ -735,7 +839,6 @@ class Scene(GLScene):
                 else:
                     code_lines.append(dedented)
         
-        print(f"[DEBUG] Code to execute:\n{''.join(code_lines[:200])}...")
         return ''.join(code_lines)
     
     
@@ -766,10 +869,6 @@ class Scene(GLScene):
     
     def play_n(self, n):
         """Play only animation n from restored state."""
-        print(f"\n[DEBUG] play_n({n}) called")
-        print(f"[DEBUG] Current checkpoint: {self.current_checkpoint}")
-        print(f"[DEBUG] Total checkpoints: {len(self.checkpoints)}")
-        
         if n <= 0:
             return False
         
@@ -787,7 +886,6 @@ class Scene(GLScene):
             if stored_locals and self.shell is not None:
                 # Update namespace with stored variables
                 self.shell.user_module.__dict__.update(stored_locals)
-                print(f"[DEBUG] Restored namespace with variables: {list(stored_locals.keys())}")
         else:
             # Clear for first animation
             self.clear()
@@ -816,13 +914,15 @@ class Scene(GLScene):
         try:
             # Ensure self is available in namespace
             if self.shell is not None:
-                self.shell.user_module.__dict__['self'] = self
-            
-            result = self.shell.run_cell(code, silent=True, store_history=False)
-            
-            if result.error_in_exec:
-                print(f"Error executing code: {result.error_in_exec}")
-                return False
+                namespace = self.shell.user_module.__dict__
+                namespace['self'] = self
+                # Use our _execute_code method which injects line tracking
+                self._execute_code(code, namespace)
+            else:
+                # Use exec with our namespace
+                namespace = self.code_namespace if hasattr(self, 'code_namespace') else {'self': self}
+                self._execute_code(code, namespace)
+                
         except Exception as e:
             print(f"Error in play_n: {e}")
             import traceback
@@ -1991,11 +2091,9 @@ class Scene(GLScene):
                 # Fallback
                 line_no_after = line_no
             
-            print(f"\n[DEBUG] Saving checkpoint {self.current_checkpoint + 1}")
-            print(f"[DEBUG] Scene filepath: {self._scene_filepath}")
-            print(f"[DEBUG] Line before play: {line_no}")
-            print(f"[DEBUG] Line after play: {line_no_after}")
-            print(f"[DEBUG] Frame filename: {frame.f_code.co_filename if frame else 'None'}")
+            # Debug: Show which line we're recording for this checkpoint
+            if hasattr(self, '_current_line_in_file'):
+                print(f"[Checkpoint {self.current_checkpoint + 1}] Animation at line {self._current_line_in_file}")
             
             # Always create a new checkpoint when playing forward
             # Never replay existing checkpoints
